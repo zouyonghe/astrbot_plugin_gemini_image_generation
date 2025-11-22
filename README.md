@@ -299,9 +299,9 @@
 
 ## 🙏 致谢
 
-- [AstrBot](https://github.com/astrbot) - 强大的机器人框架
+- [AstrBot](https://docs.astrbot.app/) - 强大的机器人框架
 - [Google Gemini API](https://ai.google.dev/) - 强大的多模态AI
-- [NapCat](https://github.com/NapNeko/NapCatQQ) - OneBot v11 实现
+- [NapCat](https://napneko.github.io/) - OneBot v11 实现
 
 ## 📞 联系支持
 
