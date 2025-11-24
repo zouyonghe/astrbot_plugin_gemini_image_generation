@@ -1,5 +1,5 @@
 """
-工具函数模块 
+工具函数模块
 提供头像管理、文件传输和图像处理功能
 """
 
@@ -9,7 +9,6 @@ import os
 import struct
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import aiohttp
 
@@ -30,7 +29,7 @@ def get_plugin_data_dir() -> Path:
         return data_dir
 
 
-async def save_base64_image(base64_data: str, image_format: str = "png") -> Optional[str]:
+async def save_base64_image(base64_data: str, image_format: str = "png") -> str | None:
     """
     保存base64图像数据到文件
 
@@ -66,7 +65,7 @@ async def save_base64_image(base64_data: str, image_format: str = "png") -> Opti
         return None
 
 
-async def save_image_data(image_data: bytes, image_format: str = "png") -> Optional[str]:
+async def save_image_data(image_data: bytes, image_format: str = "png") -> str | None:
     """
     保存图像字节数据到文件
 
@@ -99,7 +98,7 @@ async def save_image_data(image_data: bytes, image_format: str = "png") -> Optio
         return None
 
 
-async def cleanup_old_images(images_dir: Optional[Path] = None):
+async def cleanup_old_images(images_dir: Path | None = None):
     """
     清理超过15分钟的图像文件
 
@@ -151,8 +150,8 @@ async def cleanup_old_images(images_dir: Optional[Path] = None):
 
 
 async def download_qq_avatar(
-    user_id: str, cache_name: str, images_dir: Optional[Path] = None
-) -> Optional[str]:
+    user_id: str, cache_name: str, images_dir: Path | None = None
+) -> str | None:
     """
     下载QQ头像并转换为base64格式
 
@@ -226,7 +225,7 @@ async def send_file(filename: str, host: str, port: int):
 
     async def recv_all(reader, size):
         """接收指定大小的数据"""
-        data = b''
+        data = b""
         while len(data) < size:
             chunk = await reader.read(size - len(data))
             if not chunk:
@@ -296,22 +295,22 @@ async def send_file(filename: str, host: str, port: int):
             try:
                 writer.close()
                 await writer.wait_closed()
-            except:
+            except Exception:
                 pass
         if reader:
             try:
                 reader.close()
-            except:
+            except Exception:
                 pass
 
 
 class AvatarManager:
     """头像管理器"""
 
-    def __init__(self, images_dir: Optional[Path] = None):
+    def __init__(self, images_dir: Path | None = None):
         self.images_dir = images_dir
 
-    async def get_avatar(self, user_id: str, cache_name: str) -> Optional[str]:
+    async def get_avatar(self, user_id: str, cache_name: str) -> str | None:
         """
         获取用户头像
 
@@ -355,7 +354,7 @@ class AvatarManager:
 
 
 # 为了向后兼容，提供一些旧名称的别名
-def download_qq_avatar_legacy(user_id: str, cache_name: str) -> Optional[str]:
+def download_qq_avatar_legacy(user_id: str, cache_name: str) -> str | None:
     """
     下载QQ头像的兼容函数
 

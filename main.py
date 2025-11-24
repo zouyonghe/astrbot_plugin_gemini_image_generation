@@ -15,9 +15,9 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.all import Image, Reply
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Plain, Image as ImageComponent
 from astrbot.api.star import Context, Star, register
 
+from .tl.enhanced_prompts import enhance_prompt_for_figure
 from .tl.tl_api import (
     APIClient,
     APIError,
@@ -25,14 +25,13 @@ from .tl.tl_api import (
     get_api_client,
 )
 from .tl.tl_utils import AvatarManager, download_qq_avatar, send_file
-from .tl.enhanced_prompts import enhance_prompt_for_figure
 
 
 @register(
     "astrbot_plugin_gemini_image_generation",
     "piexian",
     "Gemini图像生成插件，支持生图和改图，可以自动获取头像作为参考",
-    "v1.1.0",
+    "v1.2.0",
 )
 class GeminiImageGenerationPlugin(Star):
     def __init__(self, context: Context, config: dict[str, Any]):
@@ -215,18 +214,15 @@ class GeminiImageGenerationPlugin(Star):
 
     def _load_config(self):
         """从配置加载所有设置"""
-        # API 密钥列表
         self.api_keys = self.config.get("openrouter_api_keys", [])
         if not isinstance(self.api_keys, list):
             self.api_keys = [self.api_keys] if self.api_keys else []
 
-        # API 设置
         api_settings = self.config.get("api_settings", {})
         self.api_type = api_settings.get("api_type", "google")
         self.api_base = api_settings.get("custom_api_base", "")
         self.model = api_settings.get("model", "gemini-3-pro-image-preview")
 
-        # 图像生成设置
         image_settings = self.config.get("image_generation_settings", {})
         self.resolution = image_settings.get("resolution", "1K")
         self.aspect_ratio = image_settings.get("aspect_ratio", "1:1")
@@ -234,13 +230,11 @@ class GeminiImageGenerationPlugin(Star):
         self.max_reference_images = image_settings.get("max_reference_images", 6)
         self.enable_text_response = image_settings.get("enable_text_response", False)
 
-        # 重试设置
         retry_settings = self.config.get("retry_settings", {})
         self.max_attempts_per_key = retry_settings.get("max_attempts_per_key", 3)
         self.enable_smart_retry = retry_settings.get("enable_smart_retry", True)
         self.total_timeout = retry_settings.get("total_timeout", 120)
 
-        # 服务设置
         service_settings = self.config.get("service_settings", {})
         self.nap_server_address = service_settings.get(
             "nap_server_address", "localhost"
@@ -249,11 +243,7 @@ class GeminiImageGenerationPlugin(Star):
         self.auto_avatar_reference = service_settings.get(
             "auto_avatar_reference", False
         )
-
-        # 日志设置
         self.verbose_logging = service_settings.get("verbose_logging", False)
-
-        # 限制/限流设置
         limit_settings = self.config.get("limit_settings", {})
         raw_mode = str(limit_settings.get("group_limit_mode", "none")).lower()
         if raw_mode not in {"none", "whitelist", "blacklist"}:
@@ -287,7 +277,6 @@ class GeminiImageGenerationPlugin(Star):
         self._rate_limit_buckets: dict[str, list[float]] = {}
         self._rate_limit_lock = asyncio.Lock()
 
-        # 初始化 API 客户端
         if self.api_keys:
             self.api_client = get_api_client(self.api_keys)
             logger.info("✓ API 客户端已初始化")
@@ -316,16 +305,26 @@ class GeminiImageGenerationPlugin(Star):
         if not value:
             return False
 
-        # 已经是 data URL 的情况，要求包含 ';base64,'
         if value.startswith("data:image/"):
             return ";base64," in value
 
-        # 纯 base64 数据：尝试严格解码
         try:
             base64.b64decode(value, validate=True)
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def _clean_text_content(text: str) -> str:
+        """清理文本内容，移除 markdown 图片链接等不可发送的内容"""
+        if not text:
+            return text
+
+        import re
+        text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
+        text = text.strip()
+
+        return text
 
     def _filter_valid_reference_images(
         self, images: list[str] | None, source: str
@@ -348,7 +347,6 @@ class GeminiImageGenerationPlugin(Star):
             if self._is_valid_base64_image_str(img):
                 valid.append(img)
             else:
-                # 只打一点点前缀，避免日志过长
                 self.log_debug(
                     f"跳过非 base64 格式参考图像({source}): {img[:64]}..."
                 )
@@ -378,21 +376,16 @@ class GeminiImageGenerationPlugin(Star):
         """
         group_id = self._get_group_id_from_event(event)
 
-        # 仅对群聊应用黑/白名单与限流，私聊不做限制
         if not group_id:
             return True, None
 
-        # 群限制模式：None / Whitelist / Blacklist
         if self.group_limit_mode == "whitelist":
-            # 仅允许列表内的群可用（静默处理未在白名单中的群）
             if self.group_limit_list and group_id not in self.group_limit_list:
                 return False, None
         elif self.group_limit_mode == "blacklist":
-            # 禁止列表内的群使用（静默处理，不返回任何消息）
             if self.group_limit_list and group_id in self.group_limit_list:
                 return False, None
 
-        # 未开启限流则直接通过
         if not self.enable_rate_limit:
             return True, None
 
@@ -401,11 +394,9 @@ class GeminiImageGenerationPlugin(Star):
 
         async with self._rate_limit_lock:
             bucket = self._rate_limit_buckets.get(group_id, [])
-            # 清理过期的时间戳
             bucket = [ts for ts in bucket if ts >= window_start]
 
             if len(bucket) >= self.max_requests_per_group:
-                # 估算距离窗口重置的剩余时间
                 earliest = bucket[0]
                 retry_after = int(earliest + self.rate_limit_period - now)
                 if retry_after < 0:
@@ -417,7 +408,6 @@ class GeminiImageGenerationPlugin(Star):
                     f"⏱️ 本群在最近 {self.rate_limit_period} 秒内的生图请求次数已达上限（{self.max_requests_per_group} 次），请约 {retry_after} 秒后再试。",
                 )
 
-            # 记录本次请求
             bucket.append(now)
             self._rate_limit_buckets[group_id] = bucket
 
@@ -442,20 +432,47 @@ class GeminiImageGenerationPlugin(Star):
         if not message_chain:
             return reference_images
 
-        # 从当前消息提取图片
+        async def convert_to_base64(img_source: str) -> str | None:
+            """将图片源转换为base64格式"""
+            try:
+                if img_source.startswith(("http://", "https://")):
+                    import aiohttp
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(img_source, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                            if response.status == 200:
+                                image_data = await response.read()
+                                return base64.b64encode(image_data).decode("utf-8")
+                            else:
+                                logger.warning(f"下载图片失败: HTTP {response.status}")
+                                return None
+                elif img_source.startswith("data:image/"):
+                    return img_source
+                elif self._is_valid_base64_image_str(img_source):
+                    return img_source
+                else:
+                    logger.debug(f"跳过非HTTP/base64格式的图片源: {img_source[:64]}...")
+                    return None
+            except Exception as e:
+                logger.warning(f"转换图片为base64失败: {e}")
+                return None
+
         for component in message_chain:
             if isinstance(component, Image) and len(reference_images) < max_images:
                 try:
-                    # 直接使用 file 属性（v1.0.0 方式）
-                    if hasattr(component, "file") and component.file and isinstance(component.file, str):
-                        reference_images.append(component.file)
-                        logger.debug(
-                            f"✓ 从当前消息提取图片 (当前: {len(reference_images)}/{max_images})"
-                        )
+                    img_source = None
+                    if hasattr(component, "url") and component.url:
+                        img_source = component.url
+                    elif hasattr(component, "file") and component.file and isinstance(component.file, str):
+                        img_source = component.file
+
+                    if img_source:
+                        base64_img = await convert_to_base64(img_source)
+                        if base64_img:
+                            reference_images.append(base64_img)
+                            logger.debug(f"✓ 从当前消息提取图片 (当前: {len(reference_images)}/{max_images})")
                 except Exception as e:
                     logger.warning(f"✗ 提取图片失败: {e}")
 
-        # 从回复消息提取图片
         for component in message_chain:
             if isinstance(component, Reply) and component.chain:
                 for reply_comp in component.chain:
@@ -464,42 +481,22 @@ class GeminiImageGenerationPlugin(Star):
                         and len(reference_images) < max_images
                     ):
                         try:
-                            # 直接使用 file 属性（v1.0.0 方式）
-                            if hasattr(reply_comp, "file") and reply_comp.file and isinstance(reply_comp.file, str):
-                                reference_images.append(reply_comp.file)
-                                self.log_debug("✓ 从回复消息提取图片")
+                            img_source = None
+                            if hasattr(reply_comp, "url") and reply_comp.url:
+                                img_source = reply_comp.url
+                            elif hasattr(reply_comp, "file") and reply_comp.file and isinstance(reply_comp.file, str):
+                                img_source = reply_comp.file
+
+                            if img_source:
+                                base64_img = await convert_to_base64(img_source)
+                                if base64_img:
+                                    reference_images.append(base64_img)
+                                    self.log_debug("✓ 从回复消息提取图片")
                         except Exception as e:
                             logger.warning(f"✗ 提取回复图片失败: {e}")
 
         logger.info(f"📸 共收集到 {len(reference_images)} 张参考图片")
         return reference_images
-
-    async def _send_image_with_fallback(self, image_path: str) -> Image:
-        """发送图片，优先使用 callback_api_base（优化版本，避免网络阻塞）"""
-        callback_api_base = self.context.get_config().get("callback_api_base")
-
-        if not callback_api_base:
-            self.log_debug("未配置 callback_api_base，使用本地文件发送")
-            return Image.fromFileSystem(image_path)
-
-        try:
-            # 尝试生成网络链接，但设置超时控制
-            image_component = Image.fromFileSystem(image_path)
-            download_url = await asyncio.wait_for(
-                image_component.convert_to_web_link(),
-                timeout=5.0,  # 5秒超时
-            )
-            self.log_debug("成功生成下载链接")
-            return Image.fromURL(download_url)
-        except asyncio.TimeoutError:
-            logger.warning("生成下载链接超时，退回到本地文件")
-            return Image.fromFileSystem(image_path)
-        except (OSError, ConnectionError, TimeoutError) as e:
-            logger.warning(f"网络/文件操作失败: {e}，退回到本地文件")
-            return Image.fromFileSystem(image_path)
-        except Exception as e:
-            logger.error(f"发送图片出错: {e}，退回到本地文件")
-            return Image.fromFileSystem(image_path)
 
     async def _generate_image_core_internal(
         self,
@@ -517,7 +514,6 @@ class GeminiImageGenerationPlugin(Star):
         if not self.api_client:
             return False, "❌ 错误: API 客户端未初始化，请联系管理员配置 API 密钥"
 
-        # 合并所有参考图片，确保只包含 base64 / data URL 字符串
         all_reference_images: list[str] = []
         all_reference_images.extend(
             self._filter_valid_reference_images(reference_images, source="消息图片")
@@ -526,7 +522,6 @@ class GeminiImageGenerationPlugin(Star):
             self._filter_valid_reference_images(avatar_reference, source="头像")
         )
 
-        # 限制参考图片数量
         if (
             all_reference_images
             and len(all_reference_images) > self.max_reference_images
@@ -536,7 +531,6 @@ class GeminiImageGenerationPlugin(Star):
             )
             all_reference_images = all_reference_images[: self.max_reference_images]
 
-        # 构建请求配置
         response_modalities = "TEXT_IMAGE" if self.enable_text_response else "IMAGE"
         request_config = ApiRequestConfig(
             model=self.model,
@@ -552,7 +546,6 @@ class GeminiImageGenerationPlugin(Star):
             enable_text_response=self.enable_text_response,
         )
 
-        # 日志记录
         logger.info("🎨 图像生成请求:")
         logger.info(f"  模型: {self.model}")
         logger.info(f"  API 类型: {self.api_type}")
@@ -560,16 +553,12 @@ class GeminiImageGenerationPlugin(Star):
             f"  参考图片: {len(all_reference_images) if all_reference_images else 0} 张"
         )
 
-        # 发送请求
         try:
             logger.info("🚀 开始调用API生成图像...")
             start_time = asyncio.get_event_loop().time()
 
-            # 计算合理的超时时间，每次重试都应有完整的超时时间
             tool_timeout = self.get_tool_timeout(event)
-            # 每次重试的超时时间，不超过配置的单次超时时间
             per_retry_timeout = min(self.total_timeout, tool_timeout)
-            # 计算总的最大时间（所有重试加起来不能超过框架超时）
             max_total_time = tool_timeout
             logger.info(
                 f"[TIMEOUT] tool_call_timeout={tool_timeout}s, per_retry_timeout={per_retry_timeout}s, max_retries={self.max_attempts_per_key}, max_total_time={max_total_time}s"
@@ -590,33 +579,9 @@ class GeminiImageGenerationPlugin(Star):
                 logger.debug(f"🧠 思维签名: {thought_signature[:50]}...")
 
             if image_path and Path(image_path).exists():
-                # 文件传输（如果需要）
                 if self.nap_server_address and self.nap_server_address != "localhost":
                     logger.info("📤 检测到远程服务器配置，开始文件传输...")
 
-                    try:
-                        remote_path = await asyncio.wait_for(
-                            send_file(
-                                image_path,
-                                HOST=self.nap_server_address,
-                                PORT=self.nap_server_port,
-                            ),
-                            timeout=10.0,
-                        )
-                        if remote_path:
-                            image_path = remote_path
-                    except asyncio.TimeoutError:
-                        logger.warning("⚠️ 文件传输超时，使用本地文件")
-                    except Exception as e:
-                        logger.warning(f"⚠️ 文件传输失败: {e}，将使用本地文件")
-
-                # 返回结果数据（不发送消息）
-                logger.info("📨 图像生成完成，准备返回结果...")
-
-                # 如果启用了远程文件传输，检查是否需要传输文件
-                final_image_path = image_path
-                if self.nap_server_address and self.nap_server_address != "localhost":
-                    logger.info("📤 检测到远程服务器配置，开始文件传输...")
                     try:
                         remote_path = await asyncio.wait_for(
                             send_file(
@@ -627,13 +592,14 @@ class GeminiImageGenerationPlugin(Star):
                             timeout=10.0,
                         )
                         if remote_path:
-                            final_image_path = remote_path
+                            image_path = remote_path
                     except asyncio.TimeoutError:
                         logger.warning("⚠️ 文件传输超时，使用本地文件")
                     except Exception as e:
                         logger.warning(f"⚠️ 文件传输失败: {e}，将使用本地文件")
 
-                return True, (final_image_path, text_content, thought_signature)
+                logger.info("📨 图像生成完成，准备返回结果...")
+                return True, (image_path, text_content, thought_signature)
             else:
                 error_msg = f"❌ 图像文件不存在或路径无效: {image_path}"
                 logger.error(error_msg)
@@ -654,7 +620,6 @@ class GeminiImageGenerationPlugin(Star):
             logger.error(f"生成图像时发生未预期的错误: {e}", exc_info=True)
             return False, f"❌ 生成图像时发生错误: {str(e)}"
 
-    # 快捷指令处理方法
     async def _quick_generate_image(
         self, event: AstrMessageEvent, prompt: str, use_avatar: bool = False
     ):
@@ -664,15 +629,12 @@ class GeminiImageGenerationPlugin(Star):
             return
 
         try:
-            # 收集参考图片
             ref_images = await self._collect_reference_images(event)
 
-            # 获取头像
             avatars = []
             if use_avatar:
                 avatars = await self.get_avatar_reference(event)
 
-            # 合并参考图片和头像，确保只包含base64字符串
             all_ref_images: list[str] = []
             all_ref_images.extend(
                 self._filter_valid_reference_images(ref_images, source="消息图片")
@@ -681,14 +643,12 @@ class GeminiImageGenerationPlugin(Star):
                 self._filter_valid_reference_images(avatars, source="头像")
             )
 
-            # 检测是否需要手办化增强
             figure_keywords = ["手办", "figure", "模型", "手办化", "手办模型"]
             if any(keyword in prompt.lower() for keyword in figure_keywords):
                 enhanced_prompt = enhance_prompt_for_figure(prompt)
             else:
-                enhanced_prompt = prompt  # 直接使用用户提示词，不添加额外风格
+                enhanced_prompt = prompt
 
-            # 构建配置
             config = ApiRequestConfig(
                 model=self.model,
                 prompt=enhanced_prompt,
@@ -704,7 +664,6 @@ class GeminiImageGenerationPlugin(Star):
 
             yield event.plain_result("🎨 生成中...")
 
-            # 生成图像
             image_url, image_path, text_content, thought_signature = await self.api_client.generate_image(
                 config=config,
                 max_retries=self.max_attempts_per_key,
@@ -715,17 +674,15 @@ class GeminiImageGenerationPlugin(Star):
             if image_url and image_path:
                 logger.debug(f"准备发送图像: image_path类型={type(image_path)}, 值={image_path}")
 
-                # 使用参考插件的方式：chain_result
-                img_component = Image.fromFileSystem(image_path)
-                chain = [img_component]
-
                 if text_content and self.enable_text_response:
-                    chain.append(Plain(f"📝 {text_content}"))
+                    cleaned_text = self._clean_text_content(text_content)
+                    if cleaned_text:
+                        yield event.plain_result(f"📝 {cleaned_text}")
+
+                yield event.image_result(image_path)
 
                 if thought_signature:
                     logger.debug(f"🧠 思维签名: {thought_signature[:50]}...")
-
-                yield event.chain_result(chain)
             else:
                 yield event.plain_result("❌ 生成失败")
 
@@ -774,7 +731,6 @@ class GeminiImageGenerationPlugin(Star):
                 yield event.plain_result(limit_message)
             return
 
-        # 判断是否需要头像（只有在有@用户时才使用）
         use_avatar = await self.should_use_avatar(event)
 
         yield event.plain_result("🎨 开始生成图像...")
@@ -782,7 +738,6 @@ class GeminiImageGenerationPlugin(Star):
         async for result in self._quick_generate_image(event, prompt, use_avatar):
             yield result
 
-    # 快速模式指令组
     @filter.command_group("快速")
     def quick_mode_group(self):
         """快速模式指令组"""
@@ -799,7 +754,6 @@ class GeminiImageGenerationPlugin(Star):
 
         yield event.plain_result("🎨 使用头像模式生成图像...")
 
-        # 临时修改配置
         old_resolution = self.resolution
         old_aspect_ratio = self.aspect_ratio
 
@@ -807,15 +761,12 @@ class GeminiImageGenerationPlugin(Star):
             self.resolution = "1K"
             self.aspect_ratio = "1:1"
 
-            # 判断是否需要头像（只有在有@用户时才使用）
             use_avatar = await self.should_use_avatar(event)
 
-            # 调用快速生成方法
             async for result in self._quick_generate_image(event, prompt, use_avatar):
                 yield result
 
         finally:
-            # 恢复原始配置
             self.resolution = old_resolution
             self.aspect_ratio = old_aspect_ratio
 
@@ -830,7 +781,6 @@ class GeminiImageGenerationPlugin(Star):
 
         yield event.plain_result("🎨 使用海报模式生成图像...")
 
-        # 临时修改配置
         old_resolution = self.resolution
         old_aspect_ratio = self.aspect_ratio
 
@@ -838,15 +788,12 @@ class GeminiImageGenerationPlugin(Star):
             self.resolution = "2K"
             self.aspect_ratio = "16:9"
 
-            # 判断是否需要头像（只有在有@用户时才使用）
             use_avatar = await self.should_use_avatar(event)
 
-            # 调用快速生成方法
             async for result in self._quick_generate_image(event, prompt, use_avatar):
                 yield result
 
         finally:
-            # 恢复原始配置
             self.resolution = old_resolution
             self.aspect_ratio = old_aspect_ratio
 
@@ -861,7 +808,6 @@ class GeminiImageGenerationPlugin(Star):
 
         yield event.plain_result("🎨 使用壁纸模式生成图像...")
 
-        # 临时修改配置
         old_resolution = self.resolution
         old_aspect_ratio = self.aspect_ratio
 
@@ -869,15 +815,12 @@ class GeminiImageGenerationPlugin(Star):
             self.resolution = "4K"
             self.aspect_ratio = "16:9"
 
-            # 判断是否需要头像（只有在有@用户时才使用）
             use_avatar = await self.should_use_avatar(event)
 
-            # 调用快速生成方法
             async for result in self._quick_generate_image(event, prompt, use_avatar):
                 yield result
 
         finally:
-            # 恢复原始配置
             self.resolution = old_resolution
             self.aspect_ratio = old_aspect_ratio
 
@@ -892,7 +835,6 @@ class GeminiImageGenerationPlugin(Star):
 
         yield event.plain_result("🎨 使用卡片模式生成图像...")
 
-        # 临时修改配置
         old_resolution = self.resolution
         old_aspect_ratio = self.aspect_ratio
 
@@ -900,15 +842,12 @@ class GeminiImageGenerationPlugin(Star):
             self.resolution = "1K"
             self.aspect_ratio = "3:2"
 
-            # 判断是否需要头像（只有在有@用户时才使用）
             use_avatar = await self.should_use_avatar(event)
 
-            # 调用快速生成方法
             async for result in self._quick_generate_image(event, prompt, use_avatar):
                 yield result
 
         finally:
-            # 恢复原始配置
             self.resolution = old_resolution
             self.aspect_ratio = old_aspect_ratio
 
@@ -923,7 +862,6 @@ class GeminiImageGenerationPlugin(Star):
 
         yield event.plain_result("🎨 使用手机模式生成图像...")
 
-        # 临时修改配置
         old_resolution = self.resolution
         old_aspect_ratio = self.aspect_ratio
 
@@ -931,15 +869,12 @@ class GeminiImageGenerationPlugin(Star):
             self.resolution = "2K"
             self.aspect_ratio = "9:16"
 
-            # 判断是否需要头像（只有在有@用户时才使用）
             use_avatar = await self.should_use_avatar(event)
 
-            # 调用快速生成方法
             async for result in self._quick_generate_image(event, prompt, use_avatar):
                 yield result
 
         finally:
-            # 恢复原始配置
             self.resolution = old_resolution
             self.aspect_ratio = old_aspect_ratio
 
@@ -962,7 +897,6 @@ class GeminiImageGenerationPlugin(Star):
         )
         full_prompt = base_prompt if not prompt else f"{base_prompt}\n{prompt}"
 
-        # 临时调整分辨率与比例以适配手办展示效果
         old_resolution = self.resolution
         old_aspect_ratio = self.aspect_ratio
 
@@ -970,7 +904,6 @@ class GeminiImageGenerationPlugin(Star):
             self.resolution = "2K"
             self.aspect_ratio = "3:2"
 
-            # 使用与其他快速模式一致的头像逻辑
             use_avatar = await self.should_use_avatar(event)
 
             async for result in self._quick_generate_image(
@@ -984,16 +917,13 @@ class GeminiImageGenerationPlugin(Star):
     @filter.command("生图帮助")
     async def show_help(self, event: AstrMessageEvent):
         """显示插件使用帮助"""
-        # 黑名单模式下的群需要静默处理，直接返回
         group_id = self._get_group_id_from_event(event)
         if group_id and self.group_limit_list:
-            # 黑名单模式：列表内静默
             if (
                 self.group_limit_mode == "blacklist"
                 and group_id in self.group_limit_list
             ):
                 return
-            # 白名单模式：不在列表内静默
             if (
                 self.group_limit_mode == "whitelist"
                 and group_id not in self.group_limit_list
@@ -1004,22 +934,26 @@ class GeminiImageGenerationPlugin(Star):
         smart_retry_status = "✓ 启用" if self.enable_smart_retry else "✗ 禁用"
         avatar_status = "✓ 启用" if self.auto_avatar_reference else "✗ 禁用"
 
-        # 获取当前聊天环境的超时配置
+        limit_settings = self.config.get("limit_settings", {})
+        enable_rate_limit = limit_settings.get("enable_rate_limit", False)
+        rate_limit_period = limit_settings.get("rate_limit_period", 60)
+        max_requests = limit_settings.get("max_requests_per_group", 5)
+        rate_limit_status = f"✓ {max_requests}次/{rate_limit_period}秒" if enable_rate_limit else None
+
         tool_timeout = self.get_tool_timeout(event)
         timeout_warning = ""
         if tool_timeout < 90:
             timeout_warning = f"⚠ 超时时间较短({tool_timeout}秒)，建议设置为90-120秒"
 
-        # 获取插件版本
         try:
             import yaml
 
             metadata_path = os.path.join(os.path.dirname(__file__), "metadata.yaml")
             with open(metadata_path, encoding="utf-8") as f:
                 metadata = yaml.safe_load(f)
-                version = metadata.get("version", "v1.1.0")
+                version = metadata.get("version", "v1.2.0")
         except Exception:
-            version = "v1.1.0"
+            version = "v1.2.0"
 
         markdown_content = rf"""# 🎨 Gemini 图像生成插件 {version}
 
@@ -1036,11 +970,9 @@ class GeminiImageGenerationPlugin(Star):
 - **超时时间**: `{tool_timeout}秒`
 - **端点**: `{self.api_base or "默认"}`"""
 
-        # 添加警告信息（如果存在）
         if timeout_warning:
             markdown_content += f"\n\n> ⚠️ 警告: {timeout_warning}"
 
-        # 添加剩余内容
         markdown_content += """
 
 ## 🚀 指令使用
@@ -1096,11 +1028,9 @@ class GeminiImageGenerationPlugin(Star):
 
 > 🤖 *由 Gemini AI 驱动的图像生成插件*"""
 
-        # 生成帮助图片
         try:
             logger.info("开始生成HTML帮助图片...")
 
-            # 构建Jinja2模板内容 - 淡蓝色主题
             jinja2_template = """<!DOCTYPE html>
 <html>
 <head>
@@ -1196,17 +1126,18 @@ class GeminiImageGenerationPlugin(Star):
             margin: 10px 0;
         }
 
-        .status ul {
-            margin: 0;
-            padding-left: 20px;
+        .status-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px 20px;
         }
 
-        .status li {
+        .status-item {
             margin: 8px 0;
             color: #1a5490;
         }
 
-        .status li strong {
+        .status-item strong {
             color: #2c5aa0;
         }
 
@@ -1265,18 +1196,21 @@ class GeminiImageGenerationPlugin(Star):
         <div class="section">
             <h2>▶ 系统状态</h2>
             <div class="status">
-                <ul>
-                    <li><strong>模型</strong>: {{ model }}</li>
-                    <li><strong>API类型</strong>: {{ api_type }}</li>
-                    <li><strong>分辨率</strong>: {{ resolution }}</li>
-                    <li><strong>长宽比</strong>: {{ aspect_ratio }}</li>
-                    <li><strong>API密钥</strong>: {{ api_keys_count }}个</li>
-                    <li><strong>搜索接地</strong>: {{ grounding_status }}</li>
-                    <li><strong>自动头像</strong>: {{ avatar_status }}</li>
-                    <li><strong>智能重试</strong>: {{ smart_retry_status }}</li>
-                    <li><strong>超时时间</strong>: {{ tool_timeout }}秒</li>
-                    <li><strong>端点</strong>: {{ api_base }}</li>
-                </ul>
+                <div class="status-grid">
+                    <div class="status-item"><strong>模型</strong>: {{ model }}</div>
+                    <div class="status-item"><strong>API类型</strong>: {{ api_type }}</div>
+                    <div class="status-item"><strong>分辨率</strong>: {{ resolution }}</div>
+                    <div class="status-item"><strong>长宽比</strong>: {{ aspect_ratio }}</div>
+                    <div class="status-item"><strong>API密钥</strong>: {{ api_keys_count }}个</div>
+                    <div class="status-item"><strong>搜索接地</strong>: {{ grounding_status }}</div>
+                    <div class="status-item"><strong>自动头像</strong>: {{ avatar_status }}</div>
+                    <div class="status-item"><strong>智能重试</strong>: {{ smart_retry_status }}</div>
+                    <div class="status-item"><strong>超时时间</strong>: {{ tool_timeout }}秒</div>
+                    <div class="status-item"><strong>端点</strong>: {{ api_base }}</div>
+                    {% if rate_limit_status %}
+                    <div class="status-item"><strong>速率限制</strong>: {{ rate_limit_status }}</div>
+                    {% endif %}
+                </div>
             </div>
             {% if timeout_warning %}
             <div class="warning">
@@ -1339,7 +1273,6 @@ class GeminiImageGenerationPlugin(Star):
 </body>
 </html>"""
 
-            # 准备模板数据
             template_data = {
                 "title": f"Gemini 图像生成插件 {version}",
                 "version": version,
@@ -1353,16 +1286,15 @@ class GeminiImageGenerationPlugin(Star):
                 "smart_retry_status": smart_retry_status,
                 "tool_timeout": tool_timeout,
                 "api_base": self.api_base or "默认",
+                "rate_limit_status": rate_limit_status,
                 "timeout_warning": timeout_warning if timeout_warning else ""
             }
 
-            # 使用正确的HTML渲染API
             help_image_url = await self.html_render(jinja2_template, template_data)
             logger.info("HTML帮助图片生成成功")
             yield event.image_result(help_image_url)
 
         except Exception as e:
-            # 如果图片生成失败，记录错误并回退到文本模式
             logger.error(f"HTML帮助图片生成失败: {e}")
             fallback_help = f"""🎨 Gemini 图像生成插件 {version}
 
@@ -1404,15 +1336,12 @@ class GeminiImageGenerationPlugin(Star):
                 yield event.plain_result(limit_message)
             return
 
-        # 收集参考图片
         ref_images = await self._collect_reference_images(event)
 
-        # 获取头像（只有在有@用户时才使用）
         avatars = await self.get_avatar_reference(event)
         if avatars:
             ref_images.extend(avatars)
 
-        # 使用新的快捷生成方法
         async for result in self._quick_generate_image(
             event, f"根据参考图像修改：{prompt}", False
         ):
@@ -1442,15 +1371,29 @@ class GeminiImageGenerationPlugin(Star):
             await self.get_avatar_reference(event) if self.auto_avatar_reference else []
         )
 
-        success, error_msg = await self._generate_image_core(
+        yield event.plain_result("🎨 开始转换风格...")
+
+        success, result_data = await self._generate_image_core_internal(
             event=event,
             prompt=full_prompt,
             reference_images=reference_images,
             avatar_reference=avatar_reference,
         )
 
-        if not success and error_msg:
-            yield event.plain_result(error_msg)
+        if success and result_data:
+            image_path, text_content, thought_signature = result_data
+
+            if text_content and self.enable_text_response:
+                cleaned_text = self._clean_text_content(text_content)
+                if cleaned_text:
+                    yield event.plain_result(f"📝 {cleaned_text}")
+
+            yield event.image_result(image_path)
+
+            if thought_signature:
+                logger.debug(f"🧠 思维签名: {thought_signature[:50]}...")
+        else:
+            yield event.plain_result(result_data)
 
     @filter.llm_tool(name="gemini_image_generation")
     async def generate_image_tool(
@@ -1462,56 +1405,19 @@ class GeminiImageGenerationPlugin(Star):
         **kwargs,
     ):
         """
-        使用 Gemini 模型生成或修改图像的高级工具
+        使用 Gemini 模型生成或修改图像
 
-        当用户请求图像生成或绘画时，调用此函数。
+        当用户请求图像生成、绘画、改图、换风格或手办化时调用此函数。
 
-        **重要判断逻辑：**
-
-        1. **用户使用以下词语时，强烈建议设置 use_reference_images="true" 和 include_user_avatar="true"**：
-           - "改成", "改为", "变成", "换成", "替换", "调整", "修改", "优化", "重做", "重新", "改图", "换风格"
-           - "基于", "根据", "按照", "参考", "依照", "以...为基础", "以...为参考"
-           - 当句子中出现"我的"、"我的头发"、"我的脸"等描述时，表示需要用户本人作为参考
-           - 示例："把我的头发改成黑色", "把图片变成动漫风格", "根据我的头像生成图片", "让我的眼睛变大"
-
-        2. **当用户说"按照我", "根据我", "基于我", "参考我", "我的头像", "我的"时**：
-           - 必须设置 use_reference_images="true" 和 include_user_avatar="true"
-           - 会自动获取当前用户的头像作为参考
-
-        3. **当用户@某个用户时**：
-           - 必须设置 use_reference_images="true" 和 include_user_avatar="true"
-           - 会自动获取被@用户的头像作为参考
-
-        4. **当用户消息中包含图片时**：
-           - 如果用户明确说"基于这张图片", "修改这张图"等，设置 use_reference_images="true"
-           - 图片可以是用户直接上传的，也可以是引用回复的消息中的图片
-
-        **提示词优化指南：**
-
-        1. **手办模型生成**：
-        "请将此照片中的主要对象精确转换为写实的、杰作级别的 1/7 比例 PVC 手办。
-        在手办旁边应放置一个盒子：盒子正面应有一个大型清晰的透明窗口，印有主要艺术作品、产品名称、品牌标志、条形码，以及一个小规格或真伪验证面板。盒子的角落还必须贴有小价签。同时，在后方放置一个电脑显示器，显示器屏幕需要显示该手办的 ZBrush 建模过程。
-        在包装盒前方，手办应放置在圆形塑料底座上。手办必须有 3D 立体感和真实感，PVC 材质的纹理需要清晰表现。如果背景可以设置为室内场景，效果会更好。"
-
-        2. **Q版手办模型**：
-        "请将此照片中的主要对象精确转换为写实的、杰作级别的 1/7 比例 PVC 手办。
-        在此手办的一侧后方，应放置一个盒子：在盒子正面，显示我输入的原始图像，带有主题艺术作品、产品名称、品牌标志、条形码，以及一个小规格或真伪验证面板。盒子的一个角落还必须贴有小价签。同时，在后方放置一个电脑显示器，显示器屏幕需要显示该手办的 ZBrush 建模过程。
-        在包装盒前方，手办应放置在圆形塑料底座上。手办必须有 3D 立体感和真实感，PVC 材质的纹理需要清晰表现。如果背景可以设置为室内场景，效果会更好。"
-
-        **质量要求：**
-        - 修复任何缺失部分时，必须没有执行不佳的元素
-        - 修复人体手办时（如适用），身体部位必须自然，动作必须协调，所有部位比例必须合理
-        - 如果原始照片不是全身照，请尝试补充手办使其成为全身版本
-        - 人物表情和动作必须与照片完全一致
-        - 手办头部不应显得太大，腿部不应显得太短，手办不应看起来矮胖（除非明确是Q版设计）
-        - 对于动物手办，应减少毛发的真实感和细节层次，使其更像手办而不是真实的原始生物
-        - 不应有外轮廓线，手办绝不能是平面的
-        - 注意近大远小的透视关系
+        判断逻辑：
+        - 用户说"改成"、"变成"、"基于"、"修改"、"改图"等词时，设置 use_reference_images="true"
+        - 用户说"根据我"、"我的头像"或@某人时，设置 use_reference_images="true" 和 include_user_avatar="true"
+        - 用户消息中包含图片且明确要求"修改这张图"时，设置 use_reference_images="true"
 
         Args:
-            prompt(string): 图像生成或修改的描述
-            use_reference_images(string): 是否使用上下文中的参考图片（true/false）。当用户意图是"修改"、"变成"、"基于"、"改成"等时，必须设置为"true"
-            include_user_avatar(string): 是否包含用户头像作为参考图像（true/false）。当用户说"根据我"、"我的头像"或明显需要用户本人图像时，设置为"true"
+            prompt(string): 图像生成或修改的详细描述
+            use_reference_images(string): 是否使用上下文中的参考图片，true或false。当用户意图是修改、变换或基于现有图片时设置为true
+            include_user_avatar(string): 是否包含用户头像作为参考图像，true或false。当用户说"根据我"、"我的头像"或@某人时设置为true
         """
         allowed, limit_message = await self._check_and_consume_limit(event)
         if not allowed:
@@ -1525,15 +1431,12 @@ class GeminiImageGenerationPlugin(Star):
             )
             return
 
-        # 收集参考图片（从消息中提取的图片，包括当前消息和引用回复中的图片）
         reference_images = []
         if str(use_reference_images).lower() in {"true", "1", "yes", "y", "是"}:
             reference_images = await self._collect_reference_images(event)
 
-        # 自动获取头像作为参考
         avatar_reference = []
 
-        # 直接信任Gemini API的判断
         avatar_value = str(include_user_avatar).lower()
         logger.info(f"[AVATAR_DEBUG] include_user_avatar参数: {avatar_value}")
 
@@ -1557,7 +1460,6 @@ class GeminiImageGenerationPlugin(Star):
         else:
             logger.info("[AVATAR_DEBUG] Gemini API未建议获取头像，跳过头像获取")
 
-        # 调用核心生成方法，但不使用yield，而是直接处理结果
         success, result_data = await self._generate_image_core_internal(
             event=event,
             prompt=prompt,
@@ -1565,31 +1467,25 @@ class GeminiImageGenerationPlugin(Star):
             avatar_reference=avatar_reference,
         )
 
-        if success and result_data:
-            # 直接发送图片和文本结果
-            image_path, text_content, thought_signature = result_data
-            message_chain = []
-
-            if text_content:
-                message_chain.append(Plain(text_content))
-
-            if image_path:
-                message_chain.append(ImageComponent.fromFileSystem(image_path))
-
-            if thought_signature:
-                logger.debug(f"🧠 思维签名: {thought_signature[:50]}...")
-
-            if message_chain:
-                yield event.chain_result(message_chain)
-        elif not success:
-            # 发送错误消息
-            yield event.plain_result(result_data)
-
-        # 清理使用的头像缓存
         try:
             await self.avatar_manager.cleanup_cache()
         except Exception as e:
             logger.warning(f"清理头像缓存失败: {e}")
+
+        if success and result_data:
+            image_path, text_content, thought_signature = result_data
+
+            if text_content and self.enable_text_response:
+                cleaned_text = self._clean_text_content(text_content)
+                if cleaned_text:
+                    yield event.plain_result(cleaned_text)
+
+            yield event.image_result(image_path)
+
+            if thought_signature:
+                logger.debug(f"🧠 思维签名: {thought_signature[:50]}...")
+        else:
+            yield event.plain_result(result_data)
 
     async def terminate(self):
         """插件卸载时清理资源"""

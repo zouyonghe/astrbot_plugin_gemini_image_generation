@@ -6,8 +6,12 @@ API客户端模块 y
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import re
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +22,7 @@ from astrbot.api import logger
 
 # 导入本地模块
 try:
-    from .tl_utils import save_base64_image, save_image_data
+    from .tl_utils import get_plugin_data_dir, save_base64_image, save_image_data
 except ImportError:
     # 如果tl_utils不存在，先创建简单的占位符
     async def save_base64_image(base64_data: str, image_format: str = "png") -> str | None:
@@ -119,21 +123,10 @@ class GeminiAPIClient:
 
         if config.reference_images:
             for base64_image in config.reference_images[:14]:
-                # 确保 base64_image 是字符串类型
-                if not isinstance(base64_image, str):
-                    logger.warning(f"跳过非字符串类型的参考图像: {type(base64_image)}")
+                mime_type, data = GeminiAPIClient._normalize_image_input(base64_image)
+                if not data:
+                    logger.warning(f"跳过无法识别/读取的参考图像: {type(base64_image)}")
                     continue
-
-                image_str = base64_image
-                if not image_str.startswith("data:image/"):
-                    image_str = f"data:image/png;base64,{image_str}"
-
-                if ";base64," in image_str:
-                    header, data = image_str.split(";base64,", 1)
-                    mime_type = header.replace("data:", "")
-                else:
-                    mime_type = "image/png"
-                    data = image_str
 
                 parts.append({"inlineData": {"mimeType": mime_type, "data": data}})
 
@@ -170,18 +163,16 @@ class GeminiAPIClient:
         # 根据官方文档设置图像尺寸
         if config.resolution:
             resolution = config.resolution.upper()
-            # 官方支持的尺寸
-            official_sizes = ["256x256", "512x512", "1024x1024", "2048x2048"]
 
             if resolution in ["1K", "1024x1024"]:
                 image_config["image_size"] = "1K"
-                logger.debug(f"设置图像尺寸: 1K")
+                logger.debug("设置图像尺寸: 1K")
             elif resolution in ["2K", "2048x2048"]:
                 image_config["image_size"] = "2K"
-                logger.debug(f"设置图像尺寸: 2K")
+                logger.debug("设置图像尺寸: 2K")
             elif resolution in ["4K", "4096x4096"]:
                 image_config["image_size"] = "4K"
-                logger.debug(f"设置图像尺寸: 4K")
+                logger.debug("设置图像尺寸: 4K")
             else:
                 # 默认使用1K
                 image_config["image_size"] = "1K"
@@ -238,15 +229,12 @@ class GeminiAPIClient:
 
         if config.reference_images:
             for base64_image in config.reference_images[:6]:
-                # 确保 base64_image 是字符串类型
-                if not isinstance(base64_image, str):
-                    logger.warning(f"跳过非字符串类型的参考图像: {type(base64_image)}")
+                mime_type, data = GeminiAPIClient._normalize_image_input(base64_image)
+                if not data:
+                    logger.warning(f"跳过无法识别/读取的参考图像: {type(base64_image)}")
                     continue
 
-                image_str = base64_image
-                if not image_str.startswith("data:image/"):
-                    image_str = f"data:image/png;base64,{image_str}"
-
+                image_str = f"data:{mime_type};base64,{data}"
                 message_content.append(
                     {"type": "image_url", "image_url": {"url": image_str}}
                 )
@@ -259,6 +247,90 @@ class GeminiAPIClient:
         }
 
         return payload
+
+    @staticmethod
+    def _normalize_image_input(image_input: Any) -> tuple[str | None, str | None]:
+        """
+        将参考图像输入规范化为 (mime_type, base64_data)。
+        支持 data URI、纯/宽松 base64 字符串、本地文件路径、file://、http/https URL。
+        """
+        try:
+            if image_input is None:
+                return None, None
+
+            image_str = str(image_input).strip()
+            if "&amp;" in image_str:
+                image_str = image_str.replace("&amp;", "&")
+            if not image_str:
+                return None, None
+
+            # data URI
+            if image_str.startswith("data:image/") and ";base64," in image_str:
+                header, data = image_str.split(";base64,", 1)
+                mime_type = header.replace("data:", "")
+                return mime_type, data
+
+            # file:// 路径
+            if image_str.startswith("file://"):
+                parsed = urllib.parse.urlparse(image_str)
+                image_path = Path(parsed.path)
+                if image_path.exists() and image_path.is_file():
+                    suffix = image_path.suffix.lower().lstrip(".") or "png"
+                    mime_type = f"image/{suffix}"
+                    with open(image_path, "rb") as f:
+                        data_bytes = f.read()
+                    data = base64.b64encode(data_bytes).decode("utf-8")
+                    return mime_type, data
+                else:
+                    logger.warning(f"file:// 路径不存在: {image_str}")
+
+            # http(s) URL -> 下载并转base64
+            if image_str.startswith("http://") or image_str.startswith("https://"):
+                try:
+                    with urllib.request.urlopen(image_str, timeout=8) as resp:
+                        content_type = resp.headers.get("Content-Type", "image/png")
+                        mime_type = content_type.split(";")[0] if content_type else "image/png"
+                        data_bytes = resp.read()
+                        if data_bytes:
+                            data = base64.b64encode(data_bytes).decode("utf-8")
+                            return mime_type, data
+                except Exception as e:
+                    logger.warning(f"下载参考图失败: {e}")
+
+            # 尝试解析为裸/宽松 base64 数据（在文件路径之前，避免长字符串导致 "File name too long"）
+            if len(image_str) > 255 or not any(char in image_str for char in ["/", "\\", "."]):
+                try:
+                    cleaned = image_str.replace("\n", "").replace(" ", "")
+                    decoded = base64.b64decode(cleaned, validate=False)
+                    if decoded and len(decoded) > 100:
+                        normalized = base64.b64encode(decoded).decode("utf-8")
+                        return "image/png", normalized
+                except (binascii.Error, ValueError):
+                    pass
+
+            # 本地文件路径（仅当字符串长度合理时尝试）
+            if len(image_str) <= 255:
+                candidate_paths = [
+                    Path(image_str),
+                    get_plugin_data_dir() / image_str,
+                    Path.cwd() / image_str,
+                ]
+                for image_path in candidate_paths:
+                    try:
+                        if image_path.exists() and image_path.is_file():
+                            suffix = image_path.suffix.lower().lstrip(".") or "png"
+                            mime_type = f"image/{suffix}"
+                            with open(image_path, "rb") as f:
+                                data_bytes = f.read()
+                            data = base64.b64encode(data_bytes).decode("utf-8")
+                            return mime_type, data
+                    except OSError:
+                        continue
+
+            return None, None
+        except Exception as e:
+            logger.warning(f"参考图像规范化失败: {e}")
+            return None, None
 
     def _get_api_url(
         self, config: ApiRequestConfig
@@ -527,9 +599,10 @@ class GeminiAPIClient:
                     thought_signature = part["thoughtSignature"]
                     logger.debug(f"🧠 找到思维签名: {thought_signature[:50]}...")
 
-                if "inlineData" in part and not part.get("thought", False):
-                    inline_data = part["inlineData"]
-                    mime_type = inline_data.get("mimeType", "image/png")
+                # 兼容 camelCase 与 snake_case 的图像返回字段
+                inline_data = part.get("inlineData") or part.get("inline_data")
+                if inline_data and not part.get("thought", False):
+                    mime_type = inline_data.get("mimeType") or inline_data.get("mime_type") or "image/png"
                     base64_data = inline_data.get("data", "")
 
                     logger.debug(
@@ -552,7 +625,8 @@ class GeminiAPIClient:
                         )
 
                         if image_path:
-                            image_url = f"file://{Path(image_path).absolute()}"
+                            # 直接使用文件路径，不使用 file:// URI（根据 AstrBot 文档要求）
+                            image_url = image_path
                     else:
                         logger.warning(f"第 {i} 个part有inlineData但data为空")
                 elif "thought" in part and part.get("thought", False):
@@ -611,29 +685,63 @@ class GeminiAPIClient:
             message = choice.get("message", {})
             content = message.get("content", "")
 
-            # 提取文本内容
-            if content:
-                text_content = content
+
+            text_chunks: list[str] = []
+            image_candidates: list[str] = []
+
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+
+                    part_type = part.get("type")
+                    if part_type == "text" and "text" in part:
+                        text_chunks.append(str(part.get("text", "")))
+                    elif part_type == "image_url":
+                        image_obj = part.get("image_url") or {}
+                        if isinstance(image_obj, dict):
+                            url_val = image_obj.get("url")
+                            if url_val:
+                                image_candidates.append(url_val)
+            elif isinstance(content, str):
+                text_chunks.append(content)
 
             # 标准 images 字段
             if "images" in message and message["images"]:
                 for image_item in message["images"]:
-                    if "image_url" in image_item:
-                        image_url = image_item["image_url"]
-                        if isinstance(image_url, str) and image_url.startswith("data:image/"):
-                            image_url, image_path = await self._parse_data_uri(image_url)
-                        elif isinstance(image_url, str):
-                            image_url, image_path = await self._download_image(image_url, session)
-                        else:
-                            logger.warning(f"跳过非字符串类型的图像URL: {type(image_url)}")
-                            continue
-                        return image_url, image_path, text_content, thought_signature
+                    if "image_url" in image_item and image_item["image_url"]:
+                        image_candidates.append(image_item["image_url"])
 
-            # content 中查找图像
+            # 组装文本内容
+            if text_chunks:
+                text_content = " ".join([t for t in text_chunks if t]).strip() or None
+
+            # 按顺序处理图像候选
+            for candidate_url in image_candidates:
+                if isinstance(candidate_url, str) and candidate_url.startswith("data:image/"):
+                    image_url, image_path = await self._parse_data_uri(candidate_url)
+                elif isinstance(candidate_url, str):
+                    # 对于可访问的 http(s) 链接，直接返回 URL，避免重复下载占用带宽
+                    if candidate_url.startswith("http://") or candidate_url.startswith("https://"):
+                        return candidate_url, None, text_content, thought_signature
+                    image_url, image_path = await self._download_image(candidate_url, session)
+                else:
+                    logger.warning(f"跳过非字符串类型的图像URL: {type(candidate_url)}")
+                    continue
+
+                if image_url or image_path:
+                    return image_url, image_path, text_content, thought_signature
+
+            # content 中查找内联 data URI（文本里）
             if isinstance(content, str):
                 extracted_url, extracted_path = await self._extract_from_content(content)
-                if extracted_url or extracted_path:
-                    return extracted_url, extracted_path, text_content, thought_signature
+            elif text_content:
+                extracted_url, extracted_path = await self._extract_from_content(text_content)
+            else:
+                extracted_url, extracted_path = (None, None)
+
+            if extracted_url or extracted_path:
+                return extracted_url, extracted_path, text_content, thought_signature
 
         # OpenAI 格式
         elif "data" in response_data and response_data["data"]:
@@ -644,7 +752,8 @@ class GeminiAPIClient:
                 elif "b64_json" in image_item:
                     image_path = await save_base64_image(image_item["b64_json"], "png")
                     if image_path:
-                        image_url = f"file://{Path(image_path).absolute()}"
+                        # 直接使用文件路径，不使用 file:// URI（根据 AstrBot 文档要求）
+                        image_url = image_path
                         return image_url, image_path, text_content, thought_signature
 
         # 如果只有文本内容，也返回
@@ -667,7 +776,8 @@ class GeminiAPIClient:
 
             image_path = await save_base64_image(base64_data, format_type)
             if image_path:
-                image_url = f"file://{Path(image_path).absolute()}"
+                # 直接使用文件路径，不使用 file:// URI（根据 AstrBot 文档要求）
+                image_url = image_path
                 return image_url, image_path
         except Exception as e:
             logger.error(f"解析 data URI 失败: {e}")
@@ -683,7 +793,8 @@ class GeminiAPIClient:
             image_format, base64_string = matches[0]
             image_path = await save_base64_image(base64_string, image_format)
             if image_path:
-                image_url = f"file://{Path(image_path).absolute()}"
+                # 直接使用文件路径，不使用 file:// URI（根据 AstrBot 文档要求）
+                image_url = image_path
                 return image_url, image_path
 
         return None, None
@@ -712,7 +823,8 @@ class GeminiAPIClient:
 
                 image_path = await save_image_data(image_data, image_format)
                 if image_path:
-                    image_url_local = f"file://{Path(image_path).absolute()}"
+                    # 直接使用文件路径，不使用 file:// URI（根据 AstrBot 文档要求）
+                    image_url_local = image_path
                     return image_url_local, image_path
         except Exception as e:
             logger.error(f"下载图像失败: {e}")
