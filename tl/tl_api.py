@@ -502,7 +502,7 @@ class GeminiAPIClient:
                 # 只有框架取消才不重试（这是最顶层的超时）
                 logger.debug("请求被框架取消（工具调用总超时），不再重试")
                 timeout_msg = "图像生成时间过长，超出了框架限制。请尝试简化图像描述或在框架配置中增加 tool_call_timeout 到 90-120 秒。"
-                raise APIError(timeout_msg, None, "cancelled")
+                raise APIError(timeout_msg, None, "cancelled") from None
             except Exception as e:
                 error_msg = str(e)
                 error_type = self._classify_error(e, error_msg)
@@ -526,7 +526,7 @@ class GeminiAPIClient:
                 else:
                     # 不可重试的错误，立即抛出
                     logger.error(f"不可重试错误: {error_msg}")
-                    raise APIError(error_msg, None, error_type)
+                    raise APIError(error_msg, None, error_type) from None
 
         # 如果都失败了，返回最后一次错误
         if last_error:
@@ -589,7 +589,7 @@ class GeminiAPIClient:
             except json.JSONDecodeError as e:
                 logger.error(f"JSON 解析失败: {e}")
                 logger.error(f"响应内容前500字符: {response_text[:500]}")
-                raise APIError(f"API 返回了无效的 JSON 响应: {e}", response.status)
+                raise APIError(f"API 返回了无效的 JSON 响应: {e}", response.status) from None
 
             if response.status == 200:
                 logger.debug("API 调用成功")

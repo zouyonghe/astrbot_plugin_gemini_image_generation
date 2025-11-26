@@ -809,9 +809,20 @@ class GeminiImageGenerationPlugin(Star):
 
         use_avatar = await self.should_use_avatar(event)
 
+        # 构造生图专用提示词，确保生成意图明确
+        generation_prompt = f"""图像生成任务：{prompt}
+
+重要要求：
+- 根据用户的描述生成全新的原创图像
+- 生成图像要完全符合用户的描述要求
+
+重要：这是一项图像生成任务，请根据描述创建全新的图像！"""
+
         yield event.plain_result("🎨 开始生成图像...")
 
-        async for result in self._quick_generate_image(event, prompt, use_avatar):
+        async for result in self._quick_generate_image(
+            event, generation_prompt, use_avatar
+        ):
             yield result
 
     @filter.command_group("快速")
