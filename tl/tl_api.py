@@ -1162,7 +1162,7 @@ class GeminiAPIClient:
                         )
                         continue
                     image_url, image_path = await self._download_image(
-                        candidate_url, session
+                        candidate_url, session, use_cache=False
                     )
                 else:
                     logger.warning(f"跳过非字符串类型的图像URL: {type(candidate_url)}")
@@ -1175,42 +1175,39 @@ class GeminiAPIClient:
                         image_paths.append(image_path)
 
             # content 中查找内联 data URI（文本里）
+            extracted_urls: list[str] = []
+            extracted_paths: list[str] = []
+
             if isinstance(content, str):
-                extracted_url, extracted_path = await self._extract_from_content(
+                extracted_urls, extracted_paths = await self._extract_from_content(
                     content
                 )
             elif text_content:
-                extracted_url, extracted_path = await self._extract_from_content(
+                extracted_urls, extracted_paths = await self._extract_from_content(
                     text_content
                 )
-            else:
-                extracted_url, extracted_path = (None, None)
 
-            if extracted_url or extracted_path:
-                if extracted_url:
-                    image_urls.append(extracted_url)
-                if extracted_path:
-                    image_paths.append(extracted_path)
+            if extracted_urls or extracted_paths:
+                image_urls.extend(extracted_urls)
+                image_paths.extend(extracted_paths)
 
         # OpenAI 格式
         elif "data" in response_data and response_data["data"]:
             for image_item in response_data["data"]:
                 if "url" in image_item:
                     image_url, image_path = await self._download_image(
-                        image_item["url"], session
+                        image_item["url"], session, use_cache=False
                     )
                     if image_url:
                         image_urls.append(image_url)
                     if image_path:
                         image_paths.append(image_path)
-                    break
                 elif "b64_json" in image_item:
                     image_path = await save_base64_image(image_item["b64_json"], "png")
                     if image_path:
                         # 直接使用文件路径，不使用 file:// URI（根据 AstrBot 文档要求）
                         image_urls.append(image_path)
                         image_paths.append(image_path)
-                        break
 
         if image_urls or image_paths:
             logger.debug(f"🖼️ OpenAI 收集到 {len(image_paths) or len(image_urls)} 张图片")
@@ -1251,20 +1248,23 @@ class GeminiAPIClient:
 
     async def _extract_from_content(
         self, content: str
-    ) -> tuple[str | None, str | None]:
-        """从文本内容中提取图像"""
+    ) -> tuple[list[str], list[str]]:
+        """从文本内容中提取所有 data URI 图像，保持顺序"""
         pattern = r"data:image/([^;]+);base64,([A-Za-z0-9+/=\s]+)"
         matches = re.findall(pattern, content)
 
-        if matches:
-            image_format, base64_string = matches[0]
+        image_urls: list[str] = []
+        image_paths: list[str] = []
+
+        for image_format, base64_string in matches:
             image_path = await save_base64_image(base64_string, image_format)
             if image_path:
                 # 直接使用文件路径，不使用 file:// URI（根据 AstrBot 文档要求）
                 image_url = image_path
-                return image_url, image_path
+                image_urls.append(image_url)
+                image_paths.append(image_path)
 
-        return None, None
+        return image_urls, image_paths
 
     def _find_image_urls_in_text(self, text: str) -> list[str]:
         """从文本/Markdown中提取可用的 http(s) 图片链接"""
@@ -1275,22 +1275,32 @@ class GeminiAPIClient:
         markdown_pattern = r"!\[[^\]]*\]\((https?://[^)]+)\)"
         raw_pattern = r"(https?://[^\s)]+\.(?:png|jpe?g|gif|webp|bmp|tiff|avif))(?:\b|$)"
 
-        urls: set[str] = set()
+        urls: list[str] = []
+        seen: set[str] = set()
         for pattern in (markdown_pattern, raw_pattern):
             for match in re.findall(pattern, text, flags=re.IGNORECASE):
                 cleaned = match.strip().replace("&amp;", "&")
-                urls.add(cleaned)
+                if cleaned not in seen:
+                    seen.add(cleaned)
+                    urls.append(cleaned)
 
-        return list(urls)
+        return urls
 
     async def _download_image(
-        self, image_url: str, session: aiohttp.ClientSession
+        self,
+        image_url: str,
+        session: aiohttp.ClientSession,
+        use_cache: bool = False,
     ) -> tuple[str | None, str | None]:
-        """下载并保存图像"""
+        """下载并保存图像，可选择是否使用缓存（默认关闭以避免返回旧图）"""
         cleaned_url = image_url.replace("&amp;", "&") if isinstance(image_url, str) else image_url
         parsed = urllib.parse.urlparse(cleaned_url)
         is_http = parsed.scheme in {"http", "https"}
-        cache_key = hashlib.sha256(cleaned_url.encode("utf-8")).hexdigest() if isinstance(cleaned_url, str) else None
+        cache_key = (
+            hashlib.sha256(cleaned_url.encode("utf-8")).hexdigest()
+            if (use_cache and isinstance(cleaned_url, str))
+            else None
+        )
 
         # 针对 CQ 码图服务器增加专用请求头
         headers: dict[str, str] = {}

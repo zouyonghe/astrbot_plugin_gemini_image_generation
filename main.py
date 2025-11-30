@@ -55,7 +55,7 @@ from .tl.tl_utils import (
     "astrbot_plugin_gemini_image_generation",
     "piexian",
     "Gemini图像生成插件，支持生图和改图，可以自动获取头像作为参考",
-    "v1.5.2",
+    "v1.5.4",
 )
 class GeminiImageGenerationPlugin(Star):
     def __init__(self, context: Context, config: dict[str, Any]):
@@ -912,14 +912,18 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
     def _merge_available_images(
         self, image_paths: list[str] | None, image_urls: list[str] | None
     ) -> list[str]:
-        """合并路径与URL，保持顺序，过滤空值"""
+        """合并路径与URL，保持顺序并去重，避免同一图重复发送"""
         merged: list[str] = []
-        for img in image_paths or []:
-            if img:
-                merged.append(img)
-        for url in image_urls or []:
-            if url:
-                merged.append(url)
+        seen: set[str] = set()
+
+        for img in (image_paths or []) + (image_urls or []):
+            if not img:
+                continue
+            if img in seen:
+                continue
+            seen.add(img)
+            merged.append(img)
+
         return merged
 
     def _build_forward_image_component(self, image: str):
@@ -987,8 +991,17 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         if len(available_images) == 1:
             logger.info("[SEND] 采用单图直发模式")
             if text_to_send:
-                yield event.plain_result(f"📝 {text_to_send}")
-            yield event.image_result(available_images[0])
+                from astrbot.api.message_components import Plain
+
+                # 同条消息发送文本+图片，减少拆分
+                yield event.chain_result(
+                    [
+                        Plain(f"📝 {text_to_send}"),
+                        self._build_forward_image_component(available_images[0]),
+                    ]
+                )
+            else:
+                yield event.image_result(available_images[0])
             if thought_signature:
                 logger.debug(f"🧠 思维签名: {thought_signature[:50]}...")
             return

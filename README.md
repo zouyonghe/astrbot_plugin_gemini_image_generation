@@ -1,8 +1,8 @@
-# AstrBot Gemini 图像生成插件 v1.5.2
+# AstrBot Gemini 图像生成插件 v1.5.4
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/Version-v1.5.2-blue)
+![Version](https://img.shields.io/badge/Version-v1.5.4-blue)
 ![License](https://img.shields.io/badge/License-MIT-orange)
 
 **🎨 强大的 Gemini 图像生成插件，支持智能头像参考和多模式生成**
@@ -382,6 +382,7 @@
   - **[PR#4](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/4)**: 手办化命令使用专用提示词
 - [@zouyonghe](https://github.com/zouyonghe) - 新增代理支持
   - **[PR#5](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/5)**: 为 Gemini API 客户端添加代理支持
+  - **[PR#6](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/6)**: 增加保留参考图尺寸开关，改图/换风格可沿用参考图分辨率
 
 ## 📞 联系支持
 
