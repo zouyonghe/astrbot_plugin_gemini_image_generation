@@ -9,6 +9,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import io
 import json
 import os
 import re
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+from PIL import Image as PILImage
 
 from astrbot.api import logger
 
@@ -57,6 +59,13 @@ except ImportError:
 
 
 IMAGE_CACHE_DIR = get_plugin_data_dir() / "images" / "download_cache"
+SUPPORTED_IMAGE_MIME_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+}
 
 
 @dataclass
@@ -79,6 +88,7 @@ class ApiRequestConfig:
     enable_text_response: bool = False  # 文本响应开关
     force_resolution: bool = False  # 强制传递分辨率参数
     verbose_logging: bool = False  # 详细日志开关
+    image_input_mode: str = "auto"  # auto/force_base64/prefer_url
 
     # 官方文档推荐参数
     temperature: float = 0.7  # 控制生成随机性，0.0-1.0
@@ -133,6 +143,60 @@ class GeminiAPIClient:
         logger.debug(f"API 客户端已初始化，支持 {len(self.api_keys)} 个 API 密钥")
         self.verbose_logging: bool = False
 
+    @staticmethod
+    def _coerce_supported_image_bytes(
+        mime_type: str | None, raw_bytes: bytes
+    ) -> tuple[str | None, str | None]:
+        """
+        将输入图片转换为 Gemini 支持的 MIME。
+        - 支持: PNG/JPEG/WEBP/HEIC/HEIF
+        - 不支持的格式尝试用 Pillow 转为 PNG
+        - 先解码为 Pillow Image，再重新编码，确保数据有效
+        """
+        normalized_mime = (mime_type or "").lower()
+        target_mime = normalized_mime if normalized_mime in SUPPORTED_IMAGE_MIME_TYPES else "image/png"
+        try:
+            with PILImage.open(io.BytesIO(raw_bytes)) as img:
+                if target_mime == "image/png":
+                    save_format = "PNG"
+                    if img.mode not in ("RGB", "RGBA"):
+                        img = img.convert("RGBA")
+                elif target_mime == "image/jpeg":
+                    save_format = "JPEG"
+                    if img.mode not in ("RGB", "L"):
+                        img = img.convert("RGB")
+                elif target_mime == "image/webp":
+                    save_format = "WEBP"
+                    if img.mode not in ("RGB", "RGBA"):
+                        img = img.convert("RGBA")
+                else:
+                    # HEIC/HEIF 等 Pillow 可能不支持，统一转 PNG
+                    save_format = "PNG"
+                    target_mime = "image/png"
+                    if img.mode not in ("RGB", "RGBA"):
+                        img = img.convert("RGBA")
+
+                buffer = io.BytesIO()
+                img.save(buffer, format=save_format)
+                buffer.seek(0)
+                encoded = base64.b64encode(buffer.read()).decode("utf-8")
+                return target_mime, encoded
+        except Exception as e:
+            logger.warning(f"参考图格式不受支持且转换失败: mime={mime_type}, err={e}")
+            return None, None
+
+    @staticmethod
+    def _coerce_supported_image(mime_type: str | None, base64_data: str) -> tuple[str | None, str | None]:
+        """
+        兼容旧调用：先尝试解码 base64，再调用字节级转换。
+        """
+        try:
+            raw = base64.b64decode(base64_data, validate=False)
+        except Exception as e:
+            logger.warning(f"base64 解码失败，无法转换为受支持格式: {e}")
+            return None, None
+        return GeminiAPIClient._coerce_supported_image_bytes(mime_type, raw)
+
     async def get_next_api_key(self) -> str:
         """获取下一个 API 密钥"""
         async with self._lock:
@@ -157,18 +221,63 @@ class GeminiAPIClient:
         """准备 Google 官方 API 请求负载（遵循官方规范）"""
         parts = [{"text": config.prompt}]
 
+        force_b64 = str(getattr(config, "image_input_mode", "auto")).lower() == "force_base64"
+        enable_file_uri = (
+            str(getattr(config, "image_input_mode", "auto")).lower() == "prefer_url"
+        )
+        allowed_file_uri_hosts = {"storage.googleapis.com", "lh3.googleusercontent.com", "gstatic.com"}
+
         if config.reference_images:
             for image_input in config.reference_images[:14]:
-                # 对Google API，所有图像都需要转换为base64
+                image_str = str(image_input).strip()
+                parsed = urllib.parse.urlparse(image_str)
+
+                # 非强制 base64 且为可识别的 http(s) 链接时，优先尝试 fileUri（仅允许部分可信域名）
+                if (
+                    enable_file_uri
+                    and not force_b64
+                    and parsed.scheme in ("http", "https")
+                    and parsed.netloc
+                ):
+                    netloc = parsed.netloc.lower()
+                    if any(netloc == host or netloc.endswith("." + host) for host in allowed_file_uri_hosts):
+                        parts.append({"fileData": {"fileUri": image_str}})
+                        logger.debug(
+                            "Gemini 官方接口使用 URL 参考图: %s",
+                            image_str[:120],
+                        )
+                        continue
+                    else:
+                        logger.debug(
+                            "URL 域名不在允许列表（或未启用 prefer_url），改用 base64 传输: %s",
+                            image_str[:120],
+                        )
+
+                # 其他情况：转换为支持的 base64
                 mime_type, data = await GeminiAPIClient._normalize_image_input(image_input)
                 if not data:
+                    if force_b64:
+                        raise APIError(
+                            f"参考图转 base64 失败（force_base64），输入类型: {type(image_input)}",
+                            None,
+                            "invalid_reference_image",
+                        )
                     logger.warning(f"跳过无法识别/读取的参考图像: {type(image_input)}")
                     continue
 
                 # 严格校验 base64，避免传入无效数据导致 inline_data 解码错误
+                cleaned_data = data.strip().replace("\n", "")
+                if cleaned_data != data:
+                    data = cleaned_data
                 try:
                     base64.b64decode(data, validate=True)
                 except Exception:
+                    if force_b64:
+                        raise APIError(
+                            "参考图 base64 校验失败（force_base64），请检查图片链接是否可访问或改用 URL 模式",
+                            None,
+                            "invalid_reference_image",
+                        )
                     logger.warning(
                         "跳过无效的 base64 参考图像: %s...",
                         str(image_input)[:80],
@@ -278,6 +387,18 @@ class GeminiAPIClient:
             {"type": "text", "text": f"Generate an image: {config.prompt}"}
         ]
 
+        force_b64 = str(getattr(config, "image_input_mode", "auto")).lower() == "force_base64"
+        def _ensure_valid_base64(data: str, context: str):
+            try:
+                cleaned = data.strip().replace("\n", "")
+                base64.b64decode(cleaned, validate=True)
+            except Exception:
+                raise APIError(
+                    f"参考图 base64 校验失败（force_base64），来源: {context}",
+                    None,
+                    "invalid_reference_image",
+                )
+
         if config.reference_images:
             # 本地缓存避免重复处理同一引用图，记录耗时便于性能观察
             processed_cache: dict[str, dict[str, Any]] = {}
@@ -316,7 +437,7 @@ class GeminiAPIClient:
 
                 try:
                     # 优先处理 http(s) URL，确保 scheme 和 netloc 合法
-                    if parsed.scheme in ("http", "https") and parsed.netloc:
+                    if parsed.scheme in ("http", "https") and parsed.netloc and not force_b64:
                         ext = Path(parsed.path).suffix.lower().lstrip(".")
                         if ext and ext not in supported_exts:
                             logger.debug(
@@ -371,6 +492,12 @@ class GeminiAPIClient:
                             image_input
                         )
                         if not data:
+                            if force_b64:
+                                raise APIError(
+                                    f"参考图转 base64 失败（force_base64），idx={idx}, type={type(image_input)}",
+                                    None,
+                                    "invalid_reference_image",
+                                )
                             logger.warning(
                                 "跳过无法识别/读取的参考图像: idx=%s type=%s",
                                 idx,
@@ -391,9 +518,15 @@ class GeminiAPIClient:
                                 "规范化后图片格式不常见: idx=%s mime=%s", idx, mime_type
                             )
 
+                        if force_b64:
+                            _ensure_valid_base64(data, f"idx={idx}")
+                            payload_url = data.strip().replace("\n", "")
+                        else:
+                            payload_url = f"data:{mime_type};base64,{data}"
+
                         image_payload = {
                             "type": "image_url",
-                            "image_url": {"url": f"data:{mime_type};base64,{data}"},
+                            "image_url": {"url": payload_url},
                         }
 
                     if image_payload:
@@ -479,7 +612,12 @@ class GeminiAPIClient:
             if image_str.startswith("data:image/") and ";base64," in image_str:
                 header, data = image_str.split(";base64,", 1)
                 mime_type = header.replace("data:", "")
-                return mime_type, data
+                try:
+                    raw = base64.b64decode(data, validate=False)
+                except Exception:
+                    logger.warning("data URL base64 解码失败")
+                    return None, None
+                return GeminiAPIClient._coerce_supported_image_bytes(mime_type, raw)
 
             # file:// 路径
             if image_str.startswith("file://"):
@@ -489,8 +627,8 @@ class GeminiAPIClient:
                     suffix = image_path.suffix.lower().lstrip(".") or "png"
                     mime_type = f"image/{suffix}"
                     try:
-                        data = encode_file_to_base64(image_path)
-                        return mime_type, data
+                        data_bytes = image_path.read_bytes()
+                        return GeminiAPIClient._coerce_supported_image_bytes(mime_type, data_bytes)
                     except Exception as e:
                         logger.warning(f"读取 file:// 路径失败: {e}")
                 else:
@@ -559,8 +697,8 @@ class GeminiAPIClient:
                                         resp.content, image_format, cache_path
                                     )
                                     if saved_path:
-                                        data = encode_file_to_base64(Path(saved_path))
-                                        return mime_type, data
+                                        data_bytes = Path(saved_path).read_bytes()
+                                        return GeminiAPIClient._coerce_supported_image_bytes(mime_type, data_bytes)
 
                                     logger.warning(
                                         "下载参考图为空: attempt=%s/%s url=%s",
@@ -661,8 +799,7 @@ class GeminiAPIClient:
                                         with open(cache_path, "wb") as f:
                                             f.write(data_bytes)
 
-                                        encoded = base64.b64encode(data_bytes).decode("utf-8")
-                                        return mime_type, encoded
+                                        return GeminiAPIClient._coerce_supported_image_bytes(mime_type, data_bytes)
                                     except Exception as e:
                                         logger.warning(
                                             "urllib 后备下载写入缓存失败: %s url=%s", e, cleaned_url
@@ -686,8 +823,7 @@ class GeminiAPIClient:
                     cleaned = image_str.replace("\n", "").replace(" ", "")
                     decoded = base64.b64decode(cleaned, validate=False)
                     if decoded and len(decoded) > 100:
-                        normalized = base64.b64encode(decoded).decode("utf-8")
-                        return "image/png", normalized
+                        return GeminiAPIClient._coerce_supported_image_bytes("image/png", decoded)
                 except (binascii.Error, ValueError):
                     pass
 
@@ -703,8 +839,8 @@ class GeminiAPIClient:
                         if image_path.exists() and image_path.is_file():
                             suffix = image_path.suffix.lower().lstrip(".") or "png"
                             mime_type = f"image/{suffix}"
-                            data = encode_file_to_base64(image_path)
-                            return mime_type, data
+                            data_bytes = image_path.read_bytes()
+                            return GeminiAPIClient._coerce_supported_image_bytes(mime_type, data_bytes)
                     except OSError:
                         continue
 

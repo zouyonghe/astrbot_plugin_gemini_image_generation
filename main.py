@@ -15,12 +15,13 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-from PIL import Image as PILImage
 import yaml
+from PIL import Image as PILImage
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Image, Reply
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.provider.entities import ProviderType
 
@@ -35,12 +36,11 @@ from .tl.enhanced_prompts import (
     get_mobile_prompt,
     get_modification_prompt,
     get_poster_prompt,
-    get_sticker_prompt,
     get_sticker_bbox_prompt,
+    get_sticker_prompt,
     get_style_change_prompt,
     get_wallpaper_prompt,
 )
-from astrbot.api.provider import ProviderRequest
 from .tl.tl_api import (
     APIClient,
     APIError,
@@ -51,7 +51,6 @@ from .tl.tl_utils import (
     AvatarManager,
     cleanup_old_images,
     download_qq_avatar,
-    encode_file_to_base64,
     send_file,
 )
 
@@ -318,6 +317,13 @@ class GeminiImageGenerationPlugin(Star):
         self.enable_llm_crop = image_settings.get("enable_llm_crop", True)
         # 从配置中读取强制分辨率设置，默认为False
         self.force_resolution = image_settings.get("force_resolution", False)
+        raw_image_mode = str(image_settings.get("image_input_mode", "auto")).lower()
+        if raw_image_mode not in {"auto", "force_base64", "prefer_url"}:
+            logger.warning(
+                f"未知的图片输入模式: {raw_image_mode}，已回退为 auto（自动选择格式）"
+            )
+            raw_image_mode = "auto"
+        self.image_input_mode = raw_image_mode
 
         retry_settings = self.config.get("retry_settings", {})
         self.max_attempts_per_key = retry_settings.get("max_attempts_per_key", 3)
@@ -488,7 +494,7 @@ class GeminiImageGenerationPlugin(Star):
                 prompt=prompt,
                 image_urls=image_urls,
                 max_output_tokens=600,
-                timeout=120, 
+                timeout=120,
                 on_llm_request=self._inject_vision_system_prompt,
             )
             text = self._extract_llm_text(resp)
@@ -620,7 +626,12 @@ class GeminiImageGenerationPlugin(Star):
         self, images: list[str] | None, source: str
     ) -> list[str]:
         """
-        过滤出合法的 base64 / data URL 参考图像。
+        过滤出合法的参考图像。
+
+        根据 image_input_mode：
+        - auto / prefer_url 支持 http(s) URL 和 base64/data URL
+        - force_base64 仅允许纯 base64（不接受 data URL）
+
 
         NapCat 等平台的图片 file_id（例如 D127D0...jpg）会在这里被过滤掉，
         避免传给 Gemini 导致 Base64 解码错误。
@@ -629,15 +640,28 @@ class GeminiImageGenerationPlugin(Star):
             return []
 
         valid: list[str] = []
+        allow_url = self.image_input_mode in {"auto", "prefer_url"}
+        force_b64 = self.image_input_mode == "force_base64"
         for img in images:
             if not isinstance(img, str) or not img:
                 self.log_debug(f"跳过非字符串参考图像({source}): {type(img)}")
                 continue
 
-            if self._is_valid_base64_image_str(img):
-                valid.append(img)
+            cleaned = img.strip()
+            if force_b64 and cleaned.lower().startswith("data:"):
+                self.log_debug(f"跳过 data URL（force_base64 模式）({source}): {cleaned[:64]}...")
+                continue
+
+            if self._is_valid_base64_image_str(cleaned):
+                valid.append(cleaned)
+            elif allow_url and (
+                cleaned.startswith("http://") or cleaned.startswith("https://")
+            ):
+                valid.append(cleaned)
             else:
-                self.log_debug(f"跳过非 base64 格式参考图像({source}): {img[:64]}...")
+                self.log_debug(
+                    f"跳过非支持格式参考图像({source}): {cleaned[:64]}..."
+                )
 
         return valid
 
@@ -759,6 +783,7 @@ class GeminiImageGenerationPlugin(Star):
         seen_sources: set[str] = set()
         seen_users: set[str] = set()
         conversion_cache: dict[str, str] = {}
+        image_mode = self.image_input_mode
         max_images = self.max_reference_images
 
         if not hasattr(event, "message_obj") or not event.message_obj:
@@ -798,47 +823,107 @@ class GeminiImageGenerationPlugin(Star):
                     return True
             return False
 
-        async def convert_to_base64(img_source: str, origin: str) -> str | None:
-            """将图片源转换为base64格式，内置QQ直链强化处理"""
+        async def convert_image_source(img_source: str, origin: str) -> str | None:
+            """
+            按 image_input_mode 转换图片源：
+            - force_base64：全部转为纯 base64
+            - auto/prefer_url：优先使用 http(s) 链接，必要时转 base64
+            """
             if not img_source:
                 return None
             if img_source in conversion_cache:
                 return conversion_cache[img_source]
 
+            source_str = str(img_source).strip()
+            if not source_str:
+                return None
+
             parsed_host = ""
             try:
-                parsed_host = urllib.parse.urlparse(str(img_source)).netloc or ""
+                parsed_host = urllib.parse.urlparse(source_str).netloc or ""
             except Exception:
                 parsed_host = ""
 
+            force_b64 = image_mode == "force_base64"
+
+            def _extract_base64_only(val: str) -> str | None:
+                """提取纯 base64 数据，剥离 data URL 前缀"""
+                try:
+                    if ";base64," in val:
+                        _, _, b64_part = val.partition(";base64,")
+                        base64.b64decode(b64_part, validate=True)
+                        return b64_part
+                    base64.b64decode(val, validate=True)
+                    return val
+                except Exception:
+                    return None
+
+            # 直接返回已是 base64/data URL 的输入
+            if self._is_valid_base64_image_str(source_str):
+                b64 = _extract_base64_only(source_str) if force_b64 else source_str
+                if b64:
+                    conversion_cache[img_source] = b64
+                    return b64
+
+            async def to_data_url(candidate: str) -> str | None:
+                """统一转为 base64（force 时只返回纯 base64，否则 data URL）"""
+                try:
+                    if not self.api_client:
+                        logger.warning("API 客户端未初始化，无法转换图片为base64")
+                        return None
+                    mime_type, base64_data = await self.api_client._normalize_image_input(
+                        candidate
+                    )
+                    if base64_data:
+                        data_url = (
+                            base64_data
+                            if force_b64
+                            else (
+                                f"data:{mime_type};base64,{base64_data}"
+                                if mime_type
+                                else base64_data
+                            )
+                        )
+                        conversion_cache[img_source] = data_url
+                        return data_url
+                    logger.debug(
+                        f"跳过无法识别的图片源({origin}): {str(candidate)[:80]}..."
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"转换图片为base64失败({origin}): {repr(e)} | Source: {str(candidate)[:80]}"
+                    )
+                return None
+
+            # QQ 图床优先转 base64，避免直链失效
             if parsed_host and "qpic.cn" in parsed_host:
-                qq_data = await self._download_qq_image(str(img_source))
+                qq_data = await self._download_qq_image(source_str)
                 if qq_data:
+                    if force_b64 and ";base64," in qq_data:
+                        qq_data = qq_data.split(";base64,", 1)[1]
                     conversion_cache[img_source] = qq_data
                     return qq_data
-                logger.warning(f"QQ图片直链处理失败，尝试通用流程: {img_source[:80]}")
-
-            try:
-                if not self.api_client:
-                    logger.warning("API 客户端未初始化，无法转换图片为base64")
+                logger.warning(f"QQ图片直链处理失败，尝试通用流程: {source_str[:80]}")
+                fallback = await to_data_url(source_str)
+                if fallback:
+                    return fallback
+                # prefer_url 模式下回退为直链；force_base64 直接放弃
+                if force_b64:
                     return None
-                mime_type, base64_data = await self.api_client._normalize_image_input(
-                    img_source
-                )
-                if base64_data:
-                    data_url = (
-                        f"data:{mime_type};base64,{base64_data}"
-                        if mime_type
-                        else base64_data
-                    )
-                    conversion_cache[img_source] = data_url
-                    return data_url
-                logger.debug(f"跳过无法识别的图片源({origin}): {str(img_source)[:80]}...")
-            except Exception as e:
-                logger.warning(
-                    f"转换图片为base64失败({origin}): {repr(e)} | Source: {str(img_source)[:80]}"
-                )
-            return None
+                conversion_cache[img_source] = source_str
+                return source_str
+
+            # 强制 base64 模式
+            if image_mode == "force_base64":
+                return await to_data_url(source_str)
+
+            # auto / prefer_url：对 http(s) 链接保留 URL，其他情况转 base64
+            if source_str.startswith("http://") or source_str.startswith("https://"):
+                cleaned_url = source_str.replace("&amp;", "&")
+                conversion_cache[img_source] = cleaned_url
+                return cleaned_url
+
+            return await to_data_url(source_str)
 
         async def handle_image_component(component, origin: str):
             if len(message_images) >= max_images:
@@ -864,9 +949,9 @@ class GeminiImageGenerationPlugin(Star):
                 return
 
             seen_sources.add(img_source)
-            base64_img = await convert_to_base64(str(img_source), origin)
-            if base64_img:
-                message_images.append(base64_img)
+            ref_img = await convert_image_source(str(img_source), origin)
+            if ref_img:
+                message_images.append(ref_img)
                 self.log_debug(
                     f"✓ 从{origin}提取图片 (当前: {len(message_images)}/{max_images})"
                 )
@@ -1019,6 +1104,7 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             enable_text_response=self.enable_text_response,
             force_resolution=self.force_resolution,
             verbose_logging=self.verbose_logging,
+            image_input_mode=self.image_input_mode,
         )
 
         logger.info("🎨 图像生成请求:")
@@ -1245,7 +1331,8 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
 
         # 合并转发
         logger.info("[SEND] 采用合并转发模式")
-        from astrbot.api.message_components import Node, Plain, Image as AstrImage
+        from astrbot.api.message_components import Image as AstrImage
+        from astrbot.api.message_components import Node, Plain
 
         node_content = []
         if text_to_send:

@@ -87,6 +87,17 @@
         "hint": "在表情包模式下，自动将生成的一张包含多表情的图片切割成独立的表情图，并以合并转发形式发送",
         "default": true
       },
+      "image_input_mode": {
+        "description": "参考图传输格式",
+        "type": "string",
+        "hint": "选择向 API 传图时的格式。auto 自动选择；force_base64 强制转为纯 base64（不接受 data URL/直链）；prefer_url 优先使用图片 URL，仅在必要时转换为 base64。",
+        "default": "auto",
+        "options": [
+          "auto",
+          "force_base64",
+          "prefer_url"
+        ]
+      },
       "enable_llm_crop": {
         "description": "启用 LLM 视觉识别裁剪",
         "type": "bool",

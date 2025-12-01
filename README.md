@@ -1,8 +1,8 @@
-# AstrBot Gemini 图像生成插件 v1.6.0
+# AstrBot Gemini 图像生成插件 v1.6.1
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/Version-v1.6.0-blue)
+![Version](https://img.shields.io/badge/Version-v1.6.1-blue)
 ![License](https://img.shields.io/badge/License-MIT-orange)
 
 **🎨 强大的 Gemini 图像生成插件，支持智能头像参考和多模式生成**
@@ -66,7 +66,9 @@
 - **api_settings.provider_id**: 生图模型提供商（`_special: select_provider`），自动读取模型/密钥/端点；不选将无法调用
 - **api_settings.vision_provider_id**: 视觉识别提供商（用于表情包智能裁剪，开启识别时必选，默认使用提供商自带模型）
 - **html_render_options.quality**: HTML 帮助页截图质量（1-100，可选）
-- **参考图下载重试**: 参考图下载仅重试 1 次（超时/空文件会直接放弃，避免长时间卡住）
+- **image_generation_settings.image_input_mode**: 参考图传输格式。`auto` 自动选择；`force_base64` 强制转为纯 base64（不接受 data URL/直链）；`prefer_url` 优先使用图片 URL，必要时再转 base64。
+- **参考图格式校验**: 参考图会在发送前统一检查 MIME，非 Gemini 支持的类型（PNG/JPEG/WEBP/HEIC/HEIF）将自动转为 PNG 再编码。
+
 
 <img width="1473" height="1386" alt="image" src="https://github.com/user-attachments/assets/0a469eea-c4bb-422b-9541-1eb61784e353" />
 <img width="1429" height="902" alt="image" src="https://github.com/user-attachments/assets/637fbfb8-8f93-4e00-960c-353d17a39c55" />
