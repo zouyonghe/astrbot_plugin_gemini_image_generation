@@ -410,10 +410,11 @@
  - **[PR#2](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/2)**: 兼容 OpenAI/Gemini混合url响应格式
  - **[PR#3](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/3)**: 兼容 OpenAI传入参数
  - **[PR#4](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/4)**: 手办化命令使用专用提示词
- - [@zouyonghe](https://github.com/zouyonghe) - 新增代理支持，可选固定尺寸
+- [@zouyonghe](https://github.com/zouyonghe) - 新增代理支持，可选固定尺寸
  - **[PR#5](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/5)**: 为 Gemini API 添加代理支持
  - **[PR#6](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/6)**: 增加保留参考图尺寸开关，改图/换风格可沿用参考图分辨率
-
+- [@vmoranv](https://github.com/vmoranv) - 优化表情包提示词
+ - **[PR#11](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/11)**: 优化表情包提示词
 ## 🤝 关联支持
 
 - **项目地址**: [GitHub Repository](https://github.com/piexian/astrbot_plugin_gemini_image_generation)
