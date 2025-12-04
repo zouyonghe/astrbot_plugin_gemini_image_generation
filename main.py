@@ -1337,7 +1337,8 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         prompt = (
             "Analyze the image and count the grid of stickers/emojis. "
             'Respond ONLY in JSON like {"rows":4,"cols":4}. '
-            'If no clear grid, respond {"rows":0,"cols":0}.'
+            "Rows/cols must be positive integers (1-20). "
+            'If the image cannot be expressed as an N x N (or N x M) grid, respond {"rows":0,"cols":0} (i.e., 0x0).'
         )
 
         try:
@@ -1359,6 +1360,15 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             data = _json.loads(json_str)
             rows = int(data.get("rows", 0))
             cols = int(data.get("cols", 0))
+            if (rows == 0 and cols == 0) or rows < 0 or cols < 0:
+                logger.debug("[GRID_DETECT] AI 返回 0x0，使用回退切割")
+                return None
+            # 兼容 AI 返回字符串如 \"4x4\"
+            if rows <= 0 or cols <= 0:
+                num_match = _re.search(r"(\\d{1,2})\\s*[xX]\\s*(\\d{1,2})", text)
+                if num_match:
+                    cols = int(num_match.group(1))
+                    rows = int(num_match.group(2))
             if rows > 0 and cols > 0 and rows <= 20 and cols <= 20:
                 logger.debug(f"[GRID_DETECT] AI 行列: {cols} x {rows}")
                 return rows, cols
