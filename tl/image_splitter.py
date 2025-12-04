@@ -545,6 +545,34 @@ class SmartMemeSplitter:
         return clean_boxes
 
 
+def ai_split_with_rows_cols(
+    image_path: str,
+    rows: int,
+    cols: int,
+    output_dir: Path,
+    file_prefix: str,
+    base_image: np.ndarray,
+) -> list[str]:
+    """调用 ai_meme_splitter 基于指定行列切分，异常返回空列表"""
+    try:
+        from .ai_meme_splitter import AIMemeSplitter
+
+        splitter = AIMemeSplitter(min_gap=5, edge_threshold=10)
+        files = splitter.split(
+            image_path,
+            str(output_dir),
+            rows=rows,
+            cols=cols,
+            debug=False,
+            file_prefix=file_prefix,
+            base_image=base_image,
+        )
+        return files or []
+    except Exception as e:
+        logger.debug(f"AI 行列切分失败: {e}")
+        return []
+
+
 def split_image(
     image_path: str,
     rows: int = 6,
@@ -554,6 +582,8 @@ def split_image(
     manual_rows: int | None = None,
     manual_cols: int | None = None,
     use_sticker_cutter: bool = False,
+    ai_rows: int | None = None,
+    ai_cols: int | None = None,
 ) -> list[str]:
     """
     使用 SmartMemeSplitter 智能切分图片
@@ -652,6 +682,14 @@ def split_image(
             boxes = generate_manual_boxes(manual_rows, manual_cols)
             if boxes:
                 logger.debug(f"使用手动网格裁剪: {manual_cols} x {manual_rows}")
+
+        # AI 行列检测（可选），仅在明确提供行列时启用
+        if not boxes and ai_rows and ai_cols and ai_rows > 0 and ai_cols > 0:
+            ai_files = ai_split_with_rows_cols(
+                image_path, ai_rows, ai_cols, final_output_dir, base_name, img
+            )
+            if ai_files:
+                return ai_files
 
         def run_sticker_cutter(debug: bool = True):
             """执行主体+附件吸附分割"""

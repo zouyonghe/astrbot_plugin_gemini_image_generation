@@ -1312,6 +1312,61 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
 
         return merged
 
+    async def _detect_grid_rows_cols(self, image_path: str) -> tuple[int, int] | None:
+        """使用视觉提供商识别网格行列数；失败返回 None"""
+        if not self.vision_provider_id:
+            return None
+
+        try:
+            with PILImage.open(image_path) as img:
+                width, height = img.size
+                max_side = max(width, height)
+                vision_input_path = image_path
+                if max_side > 1200:
+                    ratio = 1200 / max_side
+                    new_w = int(width * ratio)
+                    new_h = int(height * ratio)
+                    img = img.resize((new_w, new_h))
+                    tmp_path = Path("/tmp") / f"grid_detect_{Path(image_path).stem}.png"
+                    img.save(tmp_path, format="PNG")
+                    vision_input_path = str(tmp_path)
+        except Exception as e:
+            logger.debug(f"[GRID_DETECT] 读取/压缩图片失败，使用原图: {e}")
+            vision_input_path = image_path
+
+        prompt = (
+            "Analyze the image and count the grid of stickers/emojis. "
+            'Respond ONLY in JSON like {"rows":4,"cols":4}. '
+            'If no clear grid, respond {"rows":0,"cols":0}.'
+        )
+
+        try:
+            resp = await self.context.llm_generate(
+                chat_provider_id=self.vision_provider_id,
+                prompt=prompt,
+                image_urls=[vision_input_path],
+                max_output_tokens=200,
+                timeout=60,
+            )
+            text = self._extract_llm_text(resp)
+            if not text:
+                return None
+            import json as _json
+            import re as _re
+
+            match = _re.search(r"\{.*\}", text, _re.S)
+            json_str = match.group(0) if match else text
+            data = _json.loads(json_str)
+            rows = int(data.get("rows", 0))
+            cols = int(data.get("cols", 0))
+            if rows > 0 and cols > 0 and rows <= 20 and cols <= 20:
+                logger.debug(f"[GRID_DETECT] AI 行列: {cols} x {rows}")
+                return rows, cols
+        except Exception as e:
+            logger.debug(f"[GRID_DETECT] 视觉识别失败: {e}")
+
+        return None
+
     def _build_forward_image_component(self, image: str):
         """根据来源构造合并转发图片组件，优先使用本地文件"""
         from astrbot.api.message_components import Image as AstrImage
@@ -1842,6 +1897,13 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                 )
                 return
 
+            ai_rows = None
+            ai_cols = None
+            if self.vision_provider_id:
+                ai_res = await self._detect_grid_rows_cols(primary_image_path)
+                if ai_res:
+                    ai_rows, ai_cols = ai_res
+
             # 1. 切割图片
             yield event.plain_result("✂️ 正在切割图片...")
             try:
@@ -1851,7 +1913,12 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                     split_files = await self._llm_detect_and_split(primary_image_path)
                 if not split_files:
                     split_files = await asyncio.to_thread(
-                        split_image, primary_image_path, rows=6, cols=4
+                        split_image,
+                        primary_image_path,
+                        rows=6,
+                        cols=4,
+                        ai_rows=ai_rows,
+                        ai_cols=ai_cols,
                     )
             except Exception as e:
                 logger.error(f"切割图片时发生异常: {e}")
@@ -2043,6 +2110,13 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             )
             return
 
+        ai_rows: int | None = None
+        ai_cols: int | None = None
+        if self.vision_provider_id and not manual_cols and not manual_rows:
+            ai_res = await self._detect_grid_rows_cols(local_path)
+            if ai_res:
+                ai_rows, ai_cols = ai_res
+
         if manual_cols and manual_rows:
             yield event.plain_result(f"✂️ 按 {manual_cols}x{manual_rows} 网格切割图片...")
         elif use_sticker_cutter:
@@ -2063,6 +2137,8 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                 manual_rows=manual_rows,
                 manual_cols=manual_cols,
                 use_sticker_cutter=use_sticker_cutter,
+                ai_rows=ai_rows,
+                ai_cols=ai_cols,
             )
         except Exception as e:
             logger.error(f"切割图片时发生异常: {e}")
