@@ -248,6 +248,32 @@
         "type": "int",
         "hint": "留空使用 AstrBot 默认值",
         "default": null
+      },
+      "type": {
+        "description": "截图格式",
+        "type": "string",
+        "hint": "png 或 jpeg。若选择 jpeg，quality 生效；png 质量固定但体积更大",
+        "default": "png",
+        "options": ["png", "jpeg"]
+      },
+      "scale": {
+        "description": "截图缩放方式",
+        "type": "string",
+        "hint": "device 使用设备像素（更清晰，文件更大），css 使用 CSS 像素（更小更快）",
+        "default": "device",
+        "options": ["css", "device"]
+      },
+      "full_page": {
+        "description": "截取整页",
+        "type": "bool",
+        "hint": "true 截整页，false 仅视口",
+        "default": true
+      },
+      "omit_background": {
+        "description": "去除背景",
+        "type": "bool",
+        "hint": "仅 png 有效，设置为 true 可生成透明背景",
+        "default": false
       }
     }
   },

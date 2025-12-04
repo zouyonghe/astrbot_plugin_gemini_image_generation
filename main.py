@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import re
 import time
 import urllib.parse
 from datetime import datetime
@@ -18,6 +19,7 @@ import aiohttp
 import yaml
 from PIL import Image as PILImage
 
+import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Image, Reply
@@ -343,7 +345,12 @@ class GeminiImageGenerationPlugin(Star):
             "auto_avatar_reference", False
         )
         self.verbose_logging = service_settings.get("verbose_logging", False)
-        self.html_render_options = service_settings.get("html_render_options", {}) or {}
+        # html_render_options 在配置中为顶级字段，兼容历史位置（service_settings 下）
+        self.html_render_options = (
+            self.config.get("html_render_options")
+            or service_settings.get("html_render_options")
+            or {}
+        )
         try:
             quality_val = self.html_render_options.get("quality")
             if quality_val is not None:
@@ -355,6 +362,14 @@ class GeminiImageGenerationPlugin(Star):
                         "html_render_options.quality 超出范围(1-100)，已忽略"
                     )
                     self.html_render_options.pop("quality", None)
+            type_val = self.html_render_options.get("type")
+            if type_val and str(type_val).lower() not in {"png", "jpeg"}:
+                logger.warning("html_render_options.type 仅支持 png/jpeg，已忽略")
+                self.html_render_options.pop("type", None)
+            scale_val = self.html_render_options.get("scale")
+            if scale_val and str(scale_val) not in {"css", "device"}:
+                logger.warning("html_render_options.scale 仅支持 css/device，已忽略")
+                self.html_render_options.pop("scale", None)
         except Exception:
             logger.warning("解析 html_render_options 失败，已忽略质量设置")
             self.html_render_options.pop("quality", None)
@@ -1916,8 +1931,51 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                 pass
 
     @filter.command("切图")
-    async def split_image_command(self, event: AstrMessageEvent):
-        """对消息中的图片进行切割"""
+    async def split_image_command(self, event: AstrMessageEvent, grid: str | None = None):
+        """对消息中的图片进行切割；支持手动指定网格，例如“切图 46”表示横4列竖6行"""
+        manual_cols: int | None = None
+        manual_rows: int | None = None
+        use_sticker_cutter = False
+        grid_text = grid or ""
+
+        # 兼容部分调用场景，若参数为空则尝试从原始消息提取命令后的文本
+        if not grid_text:
+            try:
+                raw_msg = getattr(getattr(event, "message_obj", None), "raw_message", "")
+                if isinstance(raw_msg, str):
+                    grid_text = raw_msg
+                elif isinstance(raw_msg, dict):
+                    grid_text = str(raw_msg.get("message", "")) or str(raw_msg)
+            except Exception:
+                grid_text = ""
+
+        if grid_text:
+            try:
+                # 尝试截取指令后的文本，避免解析到消息前缀/ID
+                cmd_pos = grid_text.find("切图")
+                if cmd_pos != -1:
+                    grid_text = grid_text[cmd_pos + len("切图") :]
+
+                # 检测是否要求主体吸附分割（仅保留“吸附”关键词）
+                if "吸附" in grid_text:
+                    use_sticker_cutter = True
+
+                numbers = re.findall(r"\d+", grid_text)
+                if len(numbers) >= 2:
+                    manual_cols = int(numbers[0])
+                    manual_rows = int(numbers[1])
+                elif len(numbers) == 1 and len(numbers[0]) == 2:
+                    manual_cols = int(numbers[0][0])
+                    manual_rows = int(numbers[0][1])
+
+                if manual_cols is not None and manual_rows is not None:
+                    if manual_cols <= 0 or manual_rows <= 0:
+                        manual_cols = manual_rows = None
+                elif grid_text.strip():
+                    logger.debug(f"未能解析切图网格参数: {grid_text}")
+            except Exception as e:
+                logger.debug(f"切图网格参数处理异常: {e}")
+
         ref_images, _ = await self._fetch_images_from_event(
             event, include_at_avatars=False
         )
@@ -1985,12 +2043,26 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             )
             return
 
-        yield event.plain_result("✂️ 正在切割图片...")
+        if manual_cols and manual_rows:
+            yield event.plain_result(f"✂️ 按 {manual_cols}x{manual_rows} 网格切割图片...")
+        elif use_sticker_cutter:
+            yield event.plain_result("✂️ 使用主体吸附分割算法切图...")
+        else:
+            tip = "✂️ 正在切割图片..."
+            if grid:
+                tip += "（网格参数未解析，已使用智能切割）"
+            yield event.plain_result(tip)
 
         split_files: list[str] = []
         try:
             split_files = await asyncio.to_thread(
-                split_image, local_path, rows=6, cols=4
+                split_image,
+                local_path,
+                rows=6,
+                cols=4,
+                manual_rows=manual_rows,
+                manual_cols=manual_cols,
+                use_sticker_cutter=use_sticker_cutter,
             )
         except Exception as e:
             logger.error(f"切割图片时发生异常: {e}")
@@ -2149,6 +2221,10 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             render_opts = {}
             if self.html_render_options.get("quality") is not None:
                 render_opts["quality"] = self.html_render_options["quality"]
+            # 透传更多渲染选项以提升清晰度
+            for key in ("type", "full_page", "omit_background", "scale", "animations", "caret", "timeout"):
+                if key in self.html_render_options:
+                    render_opts[key] = self.html_render_options[key]
 
             try:
                 html_image_url = await self.html_render(
@@ -2272,7 +2348,7 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         use_reference_images: str,
         include_user_avatar: str = "false",
         **kwargs,
-    ):
+    ) -> list[Any]:
         """
         使用 Gemini 模型生成或修改图像
 
@@ -2291,16 +2367,17 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         allowed, limit_message = await self._check_and_consume_limit(event)
         if not allowed:
             if limit_message:
-                yield event.plain_result(limit_message)
-            return
+                return [Comp.Plain(limit_message)]
+            return [Comp.Plain("请求过于频繁，请稍后再试。")]
 
         if not self.api_client:
-            yield event.plain_result(
+            return [
+                Comp.Plain(
                 "❌ 无法生成图像：API 客户端尚未初始化。\n"
                 "🧐 可能原因：API 密钥未配置或加载失败。\n"
                 "✅ 建议：在插件配置中填写有效密钥并重启服务。"
             )
-            return
+            ]
 
         reference_images = []
         avatar_reference = []
@@ -2343,14 +2420,23 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
 
         if success and result_data:
             image_urls, image_paths, text_content, thought_signature = result_data
-            async for send_res in self._dispatch_send_results(
-                event=event,
-                image_urls=image_urls,
-                image_paths=image_paths,
-                text_content=text_content,
-                thought_signature=thought_signature,
-                scene="LLM工具",
-            ):
-                yield send_res
-        else:
-            yield event.plain_result(result_data)
+            comps: list[Any] = []
+            if text_content:
+                comps.append(Comp.Plain(text_content))
+            # 优先使用本地/远程文件路径，其次 URL
+            paths = [p for p in image_paths if p]
+            urls = [u for u in image_urls if u]
+            if paths:
+                for p in paths:
+                    try:
+                        comps.append(Comp.Image.fromFileSystem(p))
+                    except Exception:
+                        comps.append(Comp.Plain(f"[图片不可用]: {p}"))
+            elif urls:
+                for u in urls:
+                    comps.append(Comp.Image(url=u))
+            if not comps:
+                comps.append(Comp.Plain("❌ 图像生成失败，未获得可用结果。"))
+            return comps
+
+        return [Comp.Plain(str(result_data))]
