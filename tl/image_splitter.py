@@ -545,6 +545,293 @@ class SmartMemeSplitter:
         return clean_boxes
 
 
+class AIMemeSplitter:
+    """
+    AI 辅助表情包切分器（集成版）
+    接收 AI 识别的行列数后，按照行列智能优化网格并切图
+    """
+
+    def __init__(self, min_gap: int = 10, edge_threshold: int = 15):
+        self.min_gap = min_gap
+        self.edge_threshold = edge_threshold
+        self.process_steps: dict[str, np.ndarray] = {}
+        self.last_row_lines: list[int] = []
+        self.last_col_lines: list[int] = []
+        self.detected_rows = 0
+        self.detected_cols = 0
+        self.analysis_info = ""
+
+    def dilate_diff(self, img: np.ndarray) -> np.ndarray:
+        """膨胀差分提线稿，适合动漫风格"""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+        kernel = np.ones((3, 3), np.uint8)
+        dilated = cv2.dilate(gray, kernel, iterations=1)
+        diff = cv2.absdiff(gray, dilated)
+        result = 255 - diff
+        _, result = cv2.threshold(result, 230, 255, cv2.THRESH_BINARY)
+        return result
+
+    def post_process(self, lineart: np.ndarray, threshold: int = 50) -> np.ndarray:
+        """去除小连通域杂线"""
+        binary = 255 - lineart
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            binary, connectivity=8
+        )
+        new_mask = np.zeros_like(binary)
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area >= threshold:
+                new_mask[labels == i] = 255
+        return 255 - new_mask
+
+    def _optimize_grid_positions(
+        self, initial_cuts: list[int], proj_values: np.ndarray, length: int, axis_name: str
+    ) -> list[int]:
+        """在保证均匀性的前提下微调切割线，避开内容"""
+        if len(initial_cuts) <= 2:
+            return initial_cuts
+
+        optimized_cuts = [initial_cuts[0]]
+        for i in range(1, len(initial_cuts) - 1):
+            current_pos = initial_cuts[i]
+            ideal_interval = length / (len(initial_cuts) - 1)
+            ideal_pos = int(i * ideal_interval)
+            search_radius = min(int(ideal_interval * 0.3), 20)
+            search_start = max(0, ideal_pos - search_radius)
+            search_end = min(length, ideal_pos + search_radius)
+
+            best_pos = current_pos
+            best_score = float("-inf")
+            for test_pos in range(search_start, search_end):
+                gap_score = 1.0 / (1.0 + proj_values[test_pos])
+                if i == 1:
+                    prev_interval = test_pos - optimized_cuts[0]
+                    next_interval = ideal_interval
+                else:
+                    prev_interval = test_pos - optimized_cuts[-1]
+                    next_interval = ideal_interval
+                intervals = [prev_interval, next_interval]
+                mean_interval = np.mean(intervals)
+                std_interval = np.std(intervals)
+                uniformity_score = (
+                    1.0 / (1.0 + std_interval / mean_interval) if mean_interval > 0 else 0
+                )
+                distance_penalty = 1.0 / (1.0 + abs(test_pos - ideal_pos) / search_radius)
+                total_score = 0.6 * uniformity_score + 0.3 * gap_score + 0.1 * distance_penalty
+                if total_score > best_score:
+                    best_score = total_score
+                    best_pos = test_pos
+
+            optimized_cuts.append(best_pos)
+            logger.debug(f"[{axis_name}] 位置{i}: {current_pos} -> {best_pos} (偏移{best_pos - current_pos})")
+
+        optimized_cuts.append(initial_cuts[-1])
+        return optimized_cuts
+
+    def _solve_axis(
+        self, gap_proj: np.ndarray, struct_proj: np.ndarray, length: int, axis_name: str, manual_n: int
+    ) -> list[int]:
+        """根据目标行/列数求切割线"""
+        max_gap = np.max(gap_proj)
+        norm_gap = gap_proj / max_gap if max_gap > 0 else gap_proj
+        max_struct = np.max(struct_proj)
+        norm_struct = struct_proj / max_struct if max_struct > 0 else struct_proj
+
+        sorted_vals = np.sort(norm_gap)
+        baseline = np.mean(sorted_vals[: int(length * 0.1) + 1])
+        safe_threshold = baseline + 0.25
+
+        best_score = -float("inf")
+        best_cuts = [0, length]
+        n = manual_n
+        if n == 1:
+            return [0, length]
+        step = length / n
+
+        modes = []
+        gap_cuts = [0]
+        gap_vals = []
+        gap_displacements = []
+        valid_gap = True
+        for k in range(1, n):
+            ideal = int(k * step)
+            radius = int(step * 0.25)
+            start = max(0, ideal - radius)
+            end = min(length, ideal + radius)
+            window = norm_gap[start:end]
+            if len(window) == 0:
+                valid_gap = False
+                break
+            idx = np.argmin(window)
+            pos = start + idx
+            val = window[idx]
+            if val > safe_threshold * 1.5:
+                valid_gap = False
+                break
+            gap_cuts.append(pos)
+            gap_vals.append(val)
+            gap_displacements.append(abs(pos - ideal))
+        if valid_gap:
+            gap_cuts.append(length)
+            modes.append(("Gap", gap_cuts, gap_vals, gap_displacements))
+
+        if max_struct > 0:
+            struct_cuts = [0]
+            struct_vals = []
+            struct_displacements = []
+            valid_struct = True
+            for k in range(1, n):
+                ideal = int(k * step)
+                radius = int(step * 0.2)
+                start = max(0, ideal - radius)
+                end = min(length, ideal + radius)
+                window = norm_struct[start:end]
+                if len(window) == 0:
+                    valid_struct = False
+                    break
+                idx = np.argmax(window)
+                pos = start + idx
+                val = window[idx]
+                if val < 0.2:
+                    valid_struct = False
+                    break
+                struct_cuts.append(pos)
+                struct_vals.append(1.0 - val)
+                struct_displacements.append(abs(pos - ideal))
+            if valid_struct:
+                struct_cuts.append(length)
+                modes.append(("Struct", struct_cuts, struct_vals, struct_displacements))
+
+        for mode_name, cuts, vals, displacements in modes:
+            intervals = np.diff(cuts)
+            mean_interval = np.mean(intervals)
+            std_interval = np.std(intervals)
+            cv = std_interval / mean_interval if mean_interval > 0 else 0
+            score_uniformity = max(0, 1.0 - (cv / 0.3))
+            avg_val = np.mean(vals)
+            score_safety = max(0, 1.0 - avg_val)
+            avg_disp = np.mean(displacements)
+            max_disp = step * 0.3
+            score_displacement = max(0, 1.0 - (avg_disp / max_disp))
+            final_score = (
+                0.5 * score_uniformity + 0.3 * score_safety + 0.2 * score_displacement + n * 0.05
+            )
+            if final_score > best_score:
+                best_score = final_score
+                best_cuts = cuts
+
+        if len(best_cuts) > 2:
+            optimized_cuts = self._optimize_grid_positions(best_cuts, norm_gap, length, axis_name)
+            old_intervals = np.diff(best_cuts)
+            new_intervals = np.diff(optimized_cuts)
+            old_cv = np.std(old_intervals) / np.mean(old_intervals) if np.mean(old_intervals) > 0 else float("inf")
+            new_cv = np.std(new_intervals) / np.mean(new_intervals) if np.mean(new_intervals) > 0 else float("inf")
+            if new_cv <= old_cv * 1.1:
+                best_cuts = optimized_cuts
+
+        return best_cuts
+
+    def detect_grid(self, lineart: np.ndarray, target_rows: int, target_cols: int) -> tuple[list[int], list[int]]:
+        """基于目标行列检测网格线"""
+        h, w = lineart.shape
+        edges = 255 - lineart
+
+        k_w = max(3, w // 5)
+        if k_w % 2 == 0:
+            k_w += 1
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_w, 1))
+        h_struct = cv2.morphologyEx(edges, cv2.MORPH_OPEN, h_kernel)
+        h_struct_proj = np.sum(h_struct, axis=1)
+
+        k_h = max(3, h // 5)
+        if k_h % 2 == 0:
+            k_h += 1
+        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k_h))
+        v_struct = cv2.morphologyEx(edges, cv2.MORPH_OPEN, v_kernel)
+        v_struct_proj = np.sum(v_struct, axis=0)
+
+        kernel_size = 3
+        row_proj = np.convolve(np.sum(edges, axis=1), np.ones(kernel_size) / kernel_size, mode="same")
+        col_proj = np.convolve(np.sum(edges, axis=0), np.ones(kernel_size) / kernel_size, mode="same")
+
+        h_lines = self._solve_axis(row_proj, h_struct_proj, h, "水平", target_rows)
+        v_lines = self._solve_axis(col_proj, v_struct_proj, w, "垂直", target_cols)
+        logger.debug(f"最终网格: {len(h_lines) - 1}行 x {len(v_lines) - 1}列")
+        return h_lines, v_lines
+
+    def split(
+        self,
+        image_path: str,
+        output_dir: str,
+        rows: int,
+        cols: int,
+        debug: bool = False,
+        file_prefix: str | None = None,
+        base_image: np.ndarray | None = None,
+    ) -> list[str]:
+        """根据指定行列切分图像"""
+        img_original = base_image if base_image is not None else cv2.imread(image_path)
+        if img_original is None:
+            raise ValueError(f"无法读取图像: {image_path}")
+
+        self.process_steps["1_original"] = img_original.copy()
+
+        if debug:
+            logger.debug("正在提取线稿...")
+        img_lineart = self.dilate_diff(img_original)
+        self.process_steps["2_lineart"] = img_lineart.copy()
+
+        if debug:
+            logger.debug("正在去除杂线...")
+        img_clean = self.post_process(img_lineart, threshold=50)
+        self.process_steps["3_clean"] = img_clean.copy()
+
+        if debug:
+            logger.debug(f"正在按 {rows}行 x {cols}列 检测网格...")
+        h_lines, v_lines = self.detect_grid(img_clean, rows, cols)
+        self.last_row_lines = h_lines
+        self.last_col_lines = v_lines
+
+        boxes: list[tuple[int, int, int, int]] = []
+        centers: list[tuple[int, int, int, int]] = []
+        if len(h_lines) >= 2 and len(v_lines) >= 2:
+            for i in range(len(h_lines) - 1):
+                y1, y2 = h_lines[i], h_lines[i + 1]
+                cy = (y1 + y2) // 2
+                for j in range(len(v_lines) - 1):
+                    x1, x2 = v_lines[j], v_lines[j + 1]
+                    cx = (x1 + x2) // 2
+                    w_box = x2 - x1
+                    h_box = y2 - y1
+                    centers.append((cx, cy, w_box, h_box))
+
+        for cx, cy, w_box, h_box in centers:
+            x1 = max(0, cx - w_box // 2)
+            y1 = max(0, cy - h_box // 2)
+            x2 = min(img_original.shape[1], x1 + w_box)
+            y2 = min(img_original.shape[0], y1 + h_box)
+            if x2 - x1 > 20 and y2 - y1 > 20:
+                boxes.append((x1, y1, x2 - x1, y2 - y1))
+
+        if not boxes:
+            logger.debug("未检测到有效的表情包区域")
+            return []
+
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        saved_files: list[str] = []
+        for idx, (x, y, w_box, h_box) in enumerate(boxes, 1):
+            crop = img_original[y : y + h_box, x : x + w_box]
+            prefix = file_prefix or "meme"
+            filename = f"{prefix}_{idx:03d}.png"
+            filepath = Path(output_dir) / filename
+            cv2.imwrite(str(filepath), crop)
+            saved_files.append(str(filepath))
+
+        if debug:
+            logger.debug(f"成功保存 {len(saved_files)} 个表情包到 {output_dir}")
+        return saved_files
+
+
 def ai_split_with_rows_cols(
     image_path: str,
     rows: int,
@@ -553,10 +840,8 @@ def ai_split_with_rows_cols(
     file_prefix: str,
     base_image: np.ndarray,
 ) -> list[str]:
-    """调用 ai_meme_splitter 基于指定行列切分，异常返回空列表"""
+    """基于指定行列切分，异常返回空列表"""
     try:
-        from .ai_meme_splitter import AIMemeSplitter
-
         splitter = AIMemeSplitter(min_gap=5, edge_threshold=10)
         files = splitter.split(
             image_path,
@@ -677,13 +962,13 @@ def split_image(
             if boxes:
                 logger.debug(f"使用外部提供的裁剪框，共 {len(boxes)} 个")
 
-        # 手动切割优先级：外部裁剪框 > 手动指定 > 智能切分
+        # 手动切割优先级：外部裁剪框 > 手动指定 > AI > 智能切分
         if not boxes and manual_rows and manual_cols:
             boxes = generate_manual_boxes(manual_rows, manual_cols)
             if boxes:
                 logger.debug(f"使用手动网格裁剪: {manual_cols} x {manual_rows}")
 
-        # AI 行列检测（可选），仅在明确提供行列时启用
+        # AI 行列切割（可选），在没有手动网格时尝试
         if not boxes and ai_rows and ai_cols and ai_rows > 0 and ai_cols > 0:
             ai_files = ai_split_with_rows_cols(
                 image_path, ai_rows, ai_cols, final_output_dir, base_name, img
@@ -711,7 +996,7 @@ def split_image(
 
         # 如果没有外部裁剪框或手动网格，则使用 SmartMemeSplitter 进行智能切分
         if not boxes and not sticker_crops:
-            splitter = SmartMemeSplitter(min_gap=5, edge_threshold=10)
+            splitter = SmartMemeSplitter()
             boxes = splitter.detect_grid(img, debug=True)
 
         # 智能切分仍失败时，自动使用主体吸附兜底

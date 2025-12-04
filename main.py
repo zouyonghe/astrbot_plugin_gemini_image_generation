@@ -2016,30 +2016,37 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             except Exception:
                 grid_text = ""
 
+        def _parse_manual_grid(text: str) -> tuple[int | None, int | None]:
+            """只解析紧跟在“切图”指令后的数字，支持 4 4 / 44 / 4x4 格式"""
+            cleaned = text or ""
+            cmd_pos = cleaned.find("切图")
+            if cmd_pos != -1:
+                cleaned = cleaned[cmd_pos + len("切图") :]
+            cleaned = re.sub(r"\\[CQ:[^\\]]+\\]", " ", cleaned)
+            cleaned = cleaned.replace("[图片]", " ")
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            m = re.match(r"^(\d{1,2})\s*[xX*]\s*(\d{1,2})", cleaned)
+            if not m:
+                m = re.match(r"^(\d{1,2})\s+(\d{1,2})", cleaned)
+            if not m:
+                m = re.match(r"^(\d)(\d)$", cleaned)
+            if m:
+                c, r = int(m.group(1)), int(m.group(2))
+                if c > 0 and r > 0:
+                    return c, r
+            return None, None
+
         if grid_text:
             try:
-                # 尝试截取指令后的文本，避免解析到消息前缀/ID
-                cmd_pos = grid_text.find("切图")
-                if cmd_pos != -1:
-                    grid_text = grid_text[cmd_pos + len("切图") :]
-
                 # 检测是否要求主体吸附分割（仅保留“吸附”关键词）
                 if "吸附" in grid_text:
                     use_sticker_cutter = True
 
-                numbers = re.findall(r"\d+", grid_text)
-                if len(numbers) >= 2:
-                    manual_cols = int(numbers[0])
-                    manual_rows = int(numbers[1])
-                elif len(numbers) == 1 and len(numbers[0]) == 2:
-                    manual_cols = int(numbers[0][0])
-                    manual_rows = int(numbers[0][1])
+                manual_cols, manual_rows = _parse_manual_grid(grid_text)
 
-                if manual_cols is not None and manual_rows is not None:
-                    if manual_cols <= 0 or manual_rows <= 0:
-                        manual_cols = manual_rows = None
-                elif grid_text.strip():
-                    logger.debug(f"未能解析切图网格参数: {grid_text}")
+                if manual_cols is None or manual_rows is None:
+                    if grid_text.strip():
+                        logger.debug(f"未能解析切图网格参数: {grid_text}")
             except Exception as e:
                 logger.debug(f"切图网格参数处理异常: {e}")
 
@@ -2112,13 +2119,19 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
 
         ai_rows: int | None = None
         ai_cols: int | None = None
-        if self.vision_provider_id and not manual_cols and not manual_rows:
+        ai_detected = False
+        if not (manual_cols and manual_rows) and self.vision_provider_id:
             ai_res = await self._detect_grid_rows_cols(local_path)
             if ai_res:
                 ai_rows, ai_cols = ai_res
+                ai_detected = True
 
         if manual_cols and manual_rows:
             yield event.plain_result(f"✂️ 按 {manual_cols}x{manual_rows} 网格切割图片...")
+        elif ai_detected and ai_rows and ai_cols:
+            yield event.plain_result(
+                f"🤖 AI 识别到 {ai_cols}x{ai_rows} 网格，优先切割..."
+            )
         elif use_sticker_cutter:
             yield event.plain_result("✂️ 使用主体吸附分割算法切图...")
         else:
