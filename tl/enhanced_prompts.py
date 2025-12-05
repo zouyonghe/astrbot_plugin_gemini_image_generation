@@ -55,7 +55,7 @@ def get_mobile_prompt(prompt: str) -> str:
 def get_sticker_prompt(prompt: str = "") -> str:
     """获取表情包提示词"""
     base_prompt = """为我生成图中角色的绘制 Q 版的，LINE 风格的半身像表情包，注意头饰要正确
-彩色手绘风格，严格按照6*4布局均匀分布，白色背景，涵盖各种各样的常用聊天语句，或是一些有关的娱乐 meme
+彩色手绘风格，严格按照4*4布局均匀分布，白色背景，涵盖各种各样的常用聊天语句，或是一些有关的娱乐 meme
 其他需求：不要原图复制，高清修复，高质量。所有标注为手写的简体中文。
 """
 
@@ -178,7 +178,7 @@ def enhance_prompt_for_figure(prompt: str) -> str:
 def get_q_version_sticker_prompt(prompt: str = "") -> str:
     """英文版Q版表情包提示词"""
     base_prompt = """Generate a Q version drawing of the characters in the image, in LINE style, with half-body expressions, ensuring the headgear is correct.
-Color hand-drawn style, strictly following a 6*4 layout evenly distributed, with a white background, covering a variety of commonly used chat phrases or some related entertainment memes.
+Color hand-drawn style, strictly following a 4*4 layout evenly distributed, with a white background, covering a variety of commonly used chat phrases or some related entertainment memes.
 Other requirements: Do not copy the original image, high-definition restoration, high quality. All annotations should be simple symbols or in English."""
 
     if prompt.strip():

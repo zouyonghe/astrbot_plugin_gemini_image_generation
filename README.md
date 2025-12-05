@@ -1,8 +1,8 @@
-# AstrBot Gemini 图像生成插件 v1.6.3
+# AstrBot Gemini 图像生成插件 v1.6.4
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/Version-v1.6.3-blue)
+![Version](https://img.shields.io/badge/Version-v1.6.4-blue)
 ![License](https://img.shields.io/badge/License-MIT-orange)
 
 </div>
@@ -67,7 +67,7 @@
 在插件配置中设置以下参数：
 
 - **api_settings.provider_id**: 生图模型提供商（`_special: select_provider`），自动读取模型/密钥/端点；不选将无法调用
-- **api_settings.vision_provider_id**: 视觉识别提供商（用于表情包智能裁剪，开启识别时必选，默认使用提供商自带模型）
+- **api_settings.vision_provider_id**: 视觉识别提供商（可选，用于切图前 AI 识别网格行列；留空则不调用）
 - **html_render_options.quality**: HTML 帮助页截图质量（1-100，可选）
 - **image_generation_settings.image_input_mode**: 参考图传输格式。`auto` 自动选择；`force_base64` 强制转为纯 base64（不接受 data URL/直链）；`prefer_url` 优先使用图片 URL，仅在必要时转换为 base64。
 - **参考图格式校验**: 参考图会在发送前统一检查 MIME，非 Gemini 支持的类型（PNG/JPEG/WEBP/HEIC/HEIF）将自动转为 PNG 再编码。
@@ -78,6 +78,7 @@
 - `provider_id`：必填，从 AstrBot 提供商中选择生图模型。
 - `api_type`：可选，覆盖提供商类型（google/openai）。
 - `model`：可选，覆盖提供商模型名称。
+- `vision_provider_id`：可选，切图前调用视觉模型识别网格行列；留空则跳过 AI 识别。
 
 **image_generation_settings**
 - `resolution`：生成图像分辨率，默认 `1K`（可选 1K/2K/4K）。
@@ -120,7 +121,8 @@
 - **model**: 可选覆盖提供商模型；留空则使用提供商默认模型
 
 ### 智能表情包切分
-- 启用 `enable_sticker_split` 时，表情包切割先用视觉模型识别裁剪框（只要配置了 vision_provider_id），失败回退 6x4 网格
+- 切割优先级：手动网格 > AI 行列识别（需配置 vision_provider_id）> 智能网格 > 主体+附件吸附兜底
+- 未配置视觉提供商时直接进入智能网格；手动网格存在时不会调用 AI
 
 ### 限制/限流设置
 
@@ -226,8 +228,10 @@
 - **手机模式**: 自动使用2K分辨率和9:16比例，适合手机壁纸
 - **手办化模式**: 树脂收藏级手办效果，支持通过参数`1`(PVC标准版)或`2`(树脂GK收藏版)选择风格
 - **表情包模式**: 自动使用4K分辨率和16:9比例，生成Q版LINE风格表情包
-- **切图指令**: 自动从当前消息、引用消息、合并转发节点或群文件中提取图片，先尝试视觉识别裁剪（需配置 `vision_provider_id` 且开启 `enable_llm_crop`），失败回退 6x4 网格切割，直接返回切好的切片
-  - 如果智能检测失败，会使用 6x4 均分网格兜底，确保能拿到切片
+- **切图指令**: 自动从当前消息、引用消息、合并转发节点或群文件中提取图片，默认使用智能网格切分
+  - 流程：有手动网格则直接使用；否则若配置了视觉提供商先 AI 识别行列，再走智能网格，最后主体+附件吸附兜底
+  - 手动网格：指令后写数字即可，支持“切图 4 4”“切图 44”“切图4x4”等格式，等价于横4列竖4行
+  - 主体吸附：指令里包含“吸附”即启用主体+附件吸附分割算法
 
 #### 风格转换
 ```bash

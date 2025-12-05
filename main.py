@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import re
 import time
 import urllib.parse
 from datetime import datetime
@@ -18,6 +19,7 @@ import aiohttp
 import yaml
 from PIL import Image as PILImage
 
+import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Image, Reply
@@ -343,7 +345,12 @@ class GeminiImageGenerationPlugin(Star):
             "auto_avatar_reference", False
         )
         self.verbose_logging = service_settings.get("verbose_logging", False)
-        self.html_render_options = service_settings.get("html_render_options", {}) or {}
+        # html_render_options 在配置中为顶级字段，兼容历史位置（service_settings 下）
+        self.html_render_options = (
+            self.config.get("html_render_options")
+            or service_settings.get("html_render_options")
+            or {}
+        )
         try:
             quality_val = self.html_render_options.get("quality")
             if quality_val is not None:
@@ -355,6 +362,14 @@ class GeminiImageGenerationPlugin(Star):
                         "html_render_options.quality 超出范围(1-100)，已忽略"
                     )
                     self.html_render_options.pop("quality", None)
+            type_val = self.html_render_options.get("type")
+            if type_val and str(type_val).lower() not in {"png", "jpeg"}:
+                logger.warning("html_render_options.type 仅支持 png/jpeg，已忽略")
+                self.html_render_options.pop("type", None)
+            scale_val = self.html_render_options.get("scale")
+            if scale_val and str(scale_val) not in {"css", "device"}:
+                logger.warning("html_render_options.scale 仅支持 css/device，已忽略")
+                self.html_render_options.pop("scale", None)
         except Exception:
             logger.warning("解析 html_render_options 失败，已忽略质量设置")
             self.html_render_options.pop("quality", None)
@@ -1297,6 +1312,71 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
 
         return merged
 
+    async def _detect_grid_rows_cols(self, image_path: str) -> tuple[int, int] | None:
+        """使用视觉提供商识别网格行列数；失败返回 None"""
+        if not self.vision_provider_id:
+            return None
+
+        try:
+            with PILImage.open(image_path) as img:
+                width, height = img.size
+                max_side = max(width, height)
+                vision_input_path = image_path
+                if max_side > 1200:
+                    ratio = 1200 / max_side
+                    new_w = int(width * ratio)
+                    new_h = int(height * ratio)
+                    img = img.resize((new_w, new_h))
+                    tmp_path = Path("/tmp") / f"grid_detect_{Path(image_path).stem}.png"
+                    img.save(tmp_path, format="PNG")
+                    vision_input_path = str(tmp_path)
+        except Exception as e:
+            logger.debug(f"[GRID_DETECT] 读取/压缩图片失败，使用原图: {e}")
+            vision_input_path = image_path
+
+        prompt = (
+            "Analyze the image and count the grid of stickers/emojis. "
+            'Respond ONLY in JSON like {"rows":4,"cols":4}. '
+            "Rows/cols must be positive integers (1-20). "
+            'If the image cannot be expressed as an N x N (or N x M) grid, respond {"rows":0,"cols":0} (i.e., 0x0).'
+        )
+
+        try:
+            resp = await self.context.llm_generate(
+                chat_provider_id=self.vision_provider_id,
+                prompt=prompt,
+                image_urls=[vision_input_path],
+                max_output_tokens=200,
+                timeout=60,
+            )
+            text = self._extract_llm_text(resp)
+            if not text:
+                return None
+            import json as _json
+            import re as _re
+
+            match = _re.search(r"\{.*\}", text, _re.S)
+            json_str = match.group(0) if match else text
+            data = _json.loads(json_str)
+            rows = int(data.get("rows", 0))
+            cols = int(data.get("cols", 0))
+            if (rows == 0 and cols == 0) or rows < 0 or cols < 0:
+                logger.debug("[GRID_DETECT] AI 返回 0x0，使用回退切割")
+                return None
+            # 兼容 AI 返回字符串如 \"4x4\"
+            if rows <= 0 or cols <= 0:
+                num_match = _re.search(r"(\\d{1,2})\\s*[xX]\\s*(\\d{1,2})", text)
+                if num_match:
+                    cols = int(num_match.group(1))
+                    rows = int(num_match.group(2))
+            if rows > 0 and cols > 0 and rows <= 20 and cols <= 20:
+                logger.debug(f"[GRID_DETECT] AI 行列: {cols} x {rows}")
+                return rows, cols
+        except Exception as e:
+            logger.debug(f"[GRID_DETECT] 视觉识别失败: {e}")
+
+        return None
+
     def _build_forward_image_component(self, image: str):
         """根据来源构造合并转发图片组件，优先使用本地文件"""
         from astrbot.api.message_components import Image as AstrImage
@@ -1827,6 +1907,13 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                 )
                 return
 
+            ai_rows = None
+            ai_cols = None
+            if self.vision_provider_id:
+                ai_res = await self._detect_grid_rows_cols(primary_image_path)
+                if ai_res:
+                    ai_rows, ai_cols = ai_res
+
             # 1. 切割图片
             yield event.plain_result("✂️ 正在切割图片...")
             try:
@@ -1836,7 +1923,12 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                     split_files = await self._llm_detect_and_split(primary_image_path)
                 if not split_files:
                     split_files = await asyncio.to_thread(
-                        split_image, primary_image_path, rows=6, cols=4
+                        split_image,
+                        primary_image_path,
+                        rows=6,
+                        cols=4,
+                        ai_rows=ai_rows,
+                        ai_cols=ai_cols,
                     )
             except Exception as e:
                 logger.error(f"切割图片时发生异常: {e}")
@@ -1916,8 +2008,58 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                 pass
 
     @filter.command("切图")
-    async def split_image_command(self, event: AstrMessageEvent):
-        """对消息中的图片进行切割"""
+    async def split_image_command(self, event: AstrMessageEvent, grid: str | None = None):
+        """对消息中的图片进行切割；支持手动指定网格，例如“切图 46”表示横4列竖6行"""
+        manual_cols: int | None = None
+        manual_rows: int | None = None
+        use_sticker_cutter = False
+        grid_text = grid or ""
+
+        # 兼容部分调用场景，若参数为空则尝试从原始消息提取命令后的文本
+        if not grid_text:
+            try:
+                raw_msg = getattr(getattr(event, "message_obj", None), "raw_message", "")
+                if isinstance(raw_msg, str):
+                    grid_text = raw_msg
+                elif isinstance(raw_msg, dict):
+                    grid_text = str(raw_msg.get("message", "")) or str(raw_msg)
+            except Exception:
+                grid_text = ""
+
+        def _parse_manual_grid(text: str) -> tuple[int | None, int | None]:
+            """只解析紧跟在“切图”指令后的数字，支持 4 4 / 44 / 4x4 格式"""
+            cleaned = text or ""
+            cmd_pos = cleaned.find("切图")
+            if cmd_pos != -1:
+                cleaned = cleaned[cmd_pos + len("切图") :]
+            cleaned = re.sub(r"\\[CQ:[^\\]]+\\]", " ", cleaned)
+            cleaned = cleaned.replace("[图片]", " ")
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            m = re.match(r"^(\d{1,2})\s*[xX*]\s*(\d{1,2})", cleaned)
+            if not m:
+                m = re.match(r"^(\d{1,2})\s+(\d{1,2})", cleaned)
+            if not m:
+                m = re.match(r"^(\d)(\d)$", cleaned)
+            if m:
+                c, r = int(m.group(1)), int(m.group(2))
+                if c > 0 and r > 0:
+                    return c, r
+            return None, None
+
+        if grid_text:
+            try:
+                # 检测是否要求主体吸附分割（仅保留“吸附”关键词）
+                if "吸附" in grid_text:
+                    use_sticker_cutter = True
+
+                manual_cols, manual_rows = _parse_manual_grid(grid_text)
+
+                if manual_cols is None or manual_rows is None:
+                    if grid_text.strip():
+                        logger.debug(f"未能解析切图网格参数: {grid_text}")
+            except Exception as e:
+                logger.debug(f"切图网格参数处理异常: {e}")
+
         ref_images, _ = await self._fetch_images_from_event(
             event, include_at_avatars=False
         )
@@ -1985,12 +2127,41 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             )
             return
 
-        yield event.plain_result("✂️ 正在切割图片...")
+        ai_rows: int | None = None
+        ai_cols: int | None = None
+        ai_detected = False
+        if not (manual_cols and manual_rows) and self.vision_provider_id:
+            ai_res = await self._detect_grid_rows_cols(local_path)
+            if ai_res:
+                ai_rows, ai_cols = ai_res
+                ai_detected = True
+
+        if manual_cols and manual_rows:
+            yield event.plain_result(f"✂️ 按 {manual_cols}x{manual_rows} 网格切割图片...")
+        elif ai_detected and ai_rows and ai_cols:
+            yield event.plain_result(
+                f"🤖 AI 识别到 {ai_cols}x{ai_rows} 网格，优先切割..."
+            )
+        elif use_sticker_cutter:
+            yield event.plain_result("✂️ 使用主体吸附分割算法切图...")
+        else:
+            tip = "✂️ 正在切割图片..."
+            if grid:
+                tip += "（网格参数未解析，已使用智能切割）"
+            yield event.plain_result(tip)
 
         split_files: list[str] = []
         try:
             split_files = await asyncio.to_thread(
-                split_image, local_path, rows=6, cols=4
+                split_image,
+                local_path,
+                rows=6,
+                cols=4,
+                manual_rows=manual_rows,
+                manual_cols=manual_cols,
+                use_sticker_cutter=use_sticker_cutter,
+                ai_rows=ai_rows,
+                ai_cols=ai_cols,
             )
         except Exception as e:
             logger.error(f"切割图片时发生异常: {e}")
@@ -2149,6 +2320,10 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             render_opts = {}
             if self.html_render_options.get("quality") is not None:
                 render_opts["quality"] = self.html_render_options["quality"]
+            # 透传更多渲染选项以提升清晰度
+            for key in ("type", "full_page", "omit_background", "scale", "animations", "caret", "timeout"):
+                if key in self.html_render_options:
+                    render_opts[key] = self.html_render_options[key]
 
             try:
                 html_image_url = await self.html_render(
@@ -2272,7 +2447,7 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         use_reference_images: str,
         include_user_avatar: str = "false",
         **kwargs,
-    ):
+    ) -> list[Any]:
         """
         使用 Gemini 模型生成或修改图像
 
@@ -2291,16 +2466,17 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         allowed, limit_message = await self._check_and_consume_limit(event)
         if not allowed:
             if limit_message:
-                yield event.plain_result(limit_message)
-            return
+                return [Comp.Plain(limit_message)]
+            return [Comp.Plain("请求过于频繁，请稍后再试。")]
 
         if not self.api_client:
-            yield event.plain_result(
+            return [
+                Comp.Plain(
                 "❌ 无法生成图像：API 客户端尚未初始化。\n"
                 "🧐 可能原因：API 密钥未配置或加载失败。\n"
                 "✅ 建议：在插件配置中填写有效密钥并重启服务。"
             )
-            return
+            ]
 
         reference_images = []
         avatar_reference = []
@@ -2343,14 +2519,23 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
 
         if success and result_data:
             image_urls, image_paths, text_content, thought_signature = result_data
-            async for send_res in self._dispatch_send_results(
-                event=event,
-                image_urls=image_urls,
-                image_paths=image_paths,
-                text_content=text_content,
-                thought_signature=thought_signature,
-                scene="LLM工具",
-            ):
-                yield send_res
-        else:
-            yield event.plain_result(result_data)
+            comps: list[Any] = []
+            if text_content:
+                comps.append(Comp.Plain(text_content))
+            # 优先使用本地/远程文件路径，其次 URL
+            paths = [p for p in image_paths if p]
+            urls = [u for u in image_urls if u]
+            if paths:
+                for p in paths:
+                    try:
+                        comps.append(Comp.Image.fromFileSystem(p))
+                    except Exception:
+                        comps.append(Comp.Plain(f"[图片不可用]: {p}"))
+            elif urls:
+                for u in urls:
+                    comps.append(Comp.Image(url=u))
+            if not comps:
+                comps.append(Comp.Plain("❌ 图像生成失败，未获得可用结果。"))
+            return comps
+
+        return [Comp.Plain(str(result_data))]

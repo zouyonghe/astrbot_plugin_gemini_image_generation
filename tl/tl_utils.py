@@ -190,7 +190,7 @@ async def save_image_data(image_data: bytes, image_format: str = "png") -> str |
 
 async def cleanup_old_images(images_dir: Path | None = None):
     """
-    清理超过15分钟的图像文件
+    清理超过5分钟的图像文件
 
     Args:
         images_dir (Path): images 目录路径，如果为None则使用默认路径
@@ -204,7 +204,7 @@ async def cleanup_old_images(images_dir: Path | None = None):
             return
 
         current_time = datetime.now()
-        cutoff_time = current_time - timedelta(minutes=15)
+        cutoff_time = current_time - timedelta(minutes=5)
 
         # 查找 images 目录下的所有图像文件（支持新旧两种命名格式）
         image_patterns = [
@@ -339,19 +339,11 @@ async def download_qq_avatar(
         if images_dir is None:
             images_dir = get_plugin_data_dir() / "images"
 
-        cache_dir = images_dir / "avatar_cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        avatar_file = cache_dir / f"{cache_name}_avatar.jpg"
-
-        if avatar_file.exists() and avatar_file.stat().st_size > 1000:
-            base64_data = _encode_file_to_base64(avatar_file)
-            logger.debug(f"使用缓存的头像: {cache_name}")
-            return base64_data
-
         avatar_url = await _resolve_avatar_url()
         if not avatar_url:
-            logger.error(f"未找到用户 {user_id} 的头像URL，跳过下载")
-            return None
+            # 回退使用 qlogo 直链
+            avatar_url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640"
+            logger.debug(f"未从事件获取头像URL，回退 qlogo: {avatar_url}")
 
         parsed = aiohttp.helpers.URL(avatar_url)
         headers = {
@@ -388,20 +380,27 @@ async def download_qq_avatar(
                                 continue
                             return None
 
-                        with open(avatar_file, "wb") as f:
-                            async for chunk in response.content.iter_chunked(4096):
-                                if chunk:
-                                    f.write(chunk)
-
-                        if avatar_file.stat().st_size <= 1000:
+                        data = await response.read()
+                        if not data or len(data) <= 1000:
                             logger.warning(
-                                f"用户 {user_id} 头像可能为空或默认头像，文件过小，删除缓存"
+                                f"用户 {user_id} 头像可能为空或默认头像，文件过小，放弃"
                             )
-                            avatar_file.unlink(missing_ok=True)
                             return None
 
-                        base64_data = _encode_file_to_base64(avatar_file)
-                        logger.debug(f"头像下载成功: {cache_name}")
+                        # 尝试从响应头/URL 猜测 mime
+                        mime_type = (response.headers.get("Content-Type") or "").split(";")[0].lower()
+                        if not mime_type or "/" not in mime_type:
+                            suffix = (parsed.suffix or "").lower()
+                            if suffix in {".png"}:
+                                mime_type = "image/png"
+                            elif suffix in {".webp"}:
+                                mime_type = "image/webp"
+                            else:
+                                mime_type = "image/jpeg"
+
+                        encoded = base64.b64encode(data).decode()
+                        base64_data = f"data:{mime_type};base64,{encoded}"
+                        logger.debug(f"头像下载成功(仅内存使用): {cache_name}")
                         return base64_data
                 except Exception as e:
                     logger.warning(f"下载头像异常: {e} (尝试 {attempt}/{max_retries})")
@@ -841,100 +840,100 @@ async def resolve_image_source_to_path(
     if os.path.exists(src):
         return src
 
-        # base64/data URL
-        if is_valid_checker(src):
-            try:
-                b64_data = src
-                if ";base64," in src:
-                    _, _, b64_data = src.partition(";base64,")
-                data = base64.b64decode(b64_data)
-                tmp_path = Path("/tmp") / f"cut_{int(time.time() * 1000)}.png"
-                tmp_path.write_bytes(data)
-                # 验证图片可读
-                if cv2.imread(str(tmp_path)) is None:
-                    logger_obj.debug("base64 解码后图片不可读，跳过")
-                    tmp_path.unlink(missing_ok=True)
-                    return None
-                return str(tmp_path)
-            except Exception as e:
-                logger_obj.debug(f"解析base64图片失败: {e}")
+    # base64/data URL
+    if is_valid_checker(src):
+        try:
+            b64_data = src
+            if ";base64," in src:
+                _, _, b64_data = src.partition(";base64,")
+            data = base64.b64decode(b64_data)
+            tmp_path = Path("/tmp") / f"cut_{int(time.time() * 1000)}.png"
+            tmp_path.write_bytes(data)
+            # 验证图片可读
+            if cv2.imread(str(tmp_path)) is None:
+                logger_obj.debug("base64 解码后图片不可读，跳过")
+                tmp_path.unlink(missing_ok=True)
                 return None
+            return str(tmp_path)
+        except Exception as e:
+            logger_obj.debug(f"解析base64图片失败: {e}")
+            return None
 
-        # http(s) 下载
-        if src.startswith(("http://", "https://")):
+    # http(s) 下载
+    if src.startswith(("http://", "https://")):
+        parsed_host = ""
+        try:
+            parsed_host = urllib.parse.urlparse(src).netloc or ""
+        except Exception:
             parsed_host = ""
+
+        try:
+            # 命中下载缓存直接返回文件
             try:
-                parsed_host = urllib.parse.urlparse(src).netloc or ""
-            except Exception:
-                parsed_host = ""
-
-            try:
-                # 命中下载缓存直接返回文件
-                try:
-                    cache_key = hashlib.sha256(src.encode("utf-8")).hexdigest()
-                    cached = next(
-                        (
-                            p
-                            for p in IMAGE_CACHE_DIR.glob(f"{cache_key}.*")
-                            if p.exists() and p.stat().st_size > 0
-                        ),
-                        None,
-                    )
-                    if cached:
-                        return str(cached)
-                except Exception as e:
-                    logger_obj.debug(f"检查参考图缓存失败: {e}")
-
-                data_url = None
-                if download_qq_image_fn and "qpic.cn" in parsed_host:
-                    data_url = await download_qq_image_fn(src)
-
-                if not data_url and api_client:
-                    mime_type, b64 = await api_client._normalize_image_input(
-                        src, image_input_mode=image_input_mode
-                    )
-                    if b64:
-                        data_url = (
-                            b64
-                            if image_input_mode == "force_base64"
-                            else f"data:{mime_type};base64,{b64}"
-                        )
-
-                if not data_url:
-                    timeout = aiohttp.ClientTimeout(total=12, connect=5)
-                    headers = {
-                        "User-Agent": "Mozilla/5.0",
-                    }
-                    # QQ 多媒体直链需要 Referer
-                    if parsed_host.endswith("nt.qq.com"):
-                        headers["Referer"] = "https://qun.qq.com"
-                        trust_env_flag = False
-                    else:
-                        trust_env_flag = True
-                    async with aiohttp.ClientSession(
-                        headers=headers, trust_env=trust_env_flag
-                    ) as session:
-                        async with session.get(src, timeout=timeout) as resp:
-                            if resp.status == 200:
-                                mime = resp.headers.get("Content-Type", "image/png")
-                                content = await resp.read()
-                                b64 = base64.b64encode(content).decode()
-                                data_url = f"data:{mime};base64,{b64}"
-
-                if data_url and is_valid_checker(data_url):
-                    try:
-                        b64_part = data_url
-                        if ";base64," in data_url:
-                            _, _, b64_part = data_url.partition(";base64,")
-                        tmp_path = Path("/tmp") / f"cut_{int(time.time() * 1000)}.png"
-                        tmp_path.write_bytes(base64.b64decode(b64_part))
-                        if cv2.imread(str(tmp_path)) is not None:
-                            return str(tmp_path)
-                        tmp_path.unlink(missing_ok=True)
-                    except Exception as e:
-                        logger_obj.debug(f"data_url 转文件失败: {e}")
+                cache_key = hashlib.sha256(src.encode("utf-8")).hexdigest()
+                cached = next(
+                    (
+                        p
+                        for p in IMAGE_CACHE_DIR.glob(f"{cache_key}.*")
+                        if p.exists() and p.stat().st_size > 0
+                    ),
+                    None,
+                )
+                if cached:
+                    return str(cached)
             except Exception as e:
-                logger_obj.warning(f"下载图片失败: {e} | {src[:80]}")
+                logger_obj.debug(f"检查参考图缓存失败: {e}")
+
+            data_url = None
+            if download_qq_image_fn and "qpic.cn" in parsed_host:
+                data_url = await download_qq_image_fn(src)
+
+            if not data_url and api_client:
+                mime_type, b64 = await api_client._normalize_image_input(
+                    src, image_input_mode=image_input_mode
+                )
+                if b64:
+                    data_url = (
+                        b64
+                        if image_input_mode == "force_base64"
+                        else f"data:{mime_type};base64,{b64}"
+                    )
+
+            if not data_url:
+                timeout = aiohttp.ClientTimeout(total=12, connect=5)
+                headers = {
+                    "User-Agent": "Mozilla/5.0",
+                }
+                # QQ 多媒体直链需要 Referer
+                if parsed_host.endswith("nt.qq.com"):
+                    headers["Referer"] = "https://qun.qq.com"
+                    trust_env_flag = False
+                else:
+                    trust_env_flag = True
+                async with aiohttp.ClientSession(
+                    headers=headers, trust_env=trust_env_flag
+                ) as session:
+                    async with session.get(src, timeout=timeout) as resp:
+                        if resp.status == 200:
+                            mime = resp.headers.get("Content-Type", "image/png")
+                            content = await resp.read()
+                            b64 = base64.b64encode(content).decode()
+                            data_url = f"data:{mime};base64,{b64}"
+
+            if data_url and is_valid_checker(data_url):
+                try:
+                    b64_part = data_url
+                    if ";base64," in data_url:
+                        _, _, b64_part = data_url.partition(";base64,")
+                    tmp_path = Path("/tmp") / f"cut_{int(time.time() * 1000)}.png"
+                    tmp_path.write_bytes(base64.b64decode(b64_part))
+                    if cv2.imread(str(tmp_path)) is not None:
+                        return str(tmp_path)
+                    tmp_path.unlink(missing_ok=True)
+                except Exception as e:
+                    logger_obj.debug(f"data_url 转文件失败: {e}")
+        except Exception as e:
+            logger_obj.warning(f"下载图片失败: {e} | {src[:80]}")
 
         # 其他字符串尝试当作base64
     try:
@@ -977,23 +976,14 @@ class AvatarManager:
 
         cache_dir = self.images_dir / "avatar_cache"
         if cache_dir.exists():
-            # 清理超过7天的头像缓存
-            current_time = datetime.now()
-            cutoff_time = current_time - timedelta(days=7)
-
-            cleaned_count = 0
-            for avatar_file in cache_dir.glob("*_avatar.jpg"):
-                try:
-                    file_mtime = datetime.fromtimestamp(avatar_file.stat().st_mtime)
-                    if file_mtime < cutoff_time:
-                        avatar_file.unlink()
-                        cleaned_count += 1
-                        logger.debug(f"已清理过期头像缓存: {avatar_file.name}")
-                except Exception as e:
-                    logger.warning(f"清理头像缓存 {avatar_file} 时出错: {e}")
-
-            if cleaned_count > 0:
-                logger.debug(f"共清理 {cleaned_count} 个过期头像缓存文件")
+            # 不再使用头像缓存，直接清空目录
+            try:
+                for avatar_file in cache_dir.glob("*"):
+                    avatar_file.unlink(missing_ok=True)
+                cache_dir.rmdir()
+                logger.debug("已清空头像缓存目录")
+            except Exception as e:
+                logger.warning(f"清理头像缓存目录失败: {e}")
 
     async def cleanup_used_avatars(self):
         """清理已使用的头像缓存（别名方法）"""

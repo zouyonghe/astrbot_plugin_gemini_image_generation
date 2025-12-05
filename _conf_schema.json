@@ -27,6 +27,13 @@
         "type": "string",
         "hint": "如需覆盖 AstrBot 提供商的模型，可在此填写。例如 gemini-3-pro-image-preview 或 OpenAI 兼容模型名。留空使用提供商默认模型",
         "default": ""
+      },
+      "vision_provider_id": {
+        "description": "视觉行列检测提供商（可选）",
+        "type": "string",
+        "hint": "用于切图前 AI 识别网格行列数，留空则不调用",
+        "_special": "select_provider",
+        "default": ""
       }
     }
   },
@@ -198,14 +205,64 @@
                 "type": "int",
                 "hint": "选择白天开始的小时数（0-23点）",
                 "default": 6,
-                "options": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+                "options": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19,
+                  20,
+                  21,
+                  22,
+                  23
+                ]
               },
               "day_end": {
                 "description": "白天结束时间",
                 "type": "int",
                 "hint": "选择白天结束的小时数（0-23点）",
                 "default": 18,
-                "options": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+                "options": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19,
+                  20,
+                  21,
+                  22,
+                  23
+                ]
               },
               "day_template": {
                 "description": "白天模板文件",
@@ -248,6 +305,38 @@
         "type": "int",
         "hint": "留空使用 AstrBot 默认值",
         "default": null
+      },
+      "type": {
+        "description": "截图格式",
+        "type": "string",
+        "hint": "png 或 jpeg。若选择 jpeg，quality 生效；png 质量固定但体积更大",
+        "default": "png",
+        "options": [
+          "png",
+          "jpeg"
+        ]
+      },
+      "scale": {
+        "description": "截图缩放方式",
+        "type": "string",
+        "hint": "device 使用设备像素（更清晰，文件更大），css 使用 CSS 像素（更小更快）",
+        "default": "device",
+        "options": [
+          "css",
+          "device"
+        ]
+      },
+      "full_page": {
+        "description": "截取整页",
+        "type": "bool",
+        "hint": "true 截整页，false 仅视口",
+        "default": true
+      },
+      "omit_background": {
+        "description": "去除背景",
+        "type": "bool",
+        "hint": "仅 png 有效，设置为 true 可生成透明背景",
+        "default": false
       }
     }
   },

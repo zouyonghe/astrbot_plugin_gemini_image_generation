@@ -333,6 +333,11 @@
                         <span class="cmd-desc">将图片转换为指定艺术风格</span>
                         <span class="cmd-ex">示例: 发送图片 + /换风格 动漫 梦幻效果</span>
                     </div>
+                    <div class="command-item">
+                        <span class="cmd-code">/切图 [可选参数]</span>
+                        <span class="cmd-desc">对消息/引用/合并转发/群文件中的图片进行裁剪，默认智能网格，失败回退 6x4 网格，再自动启用“主体+附件吸附”保底</span>
+                        <span class="cmd-ex">示例: /切图 4 4（横4列竖4行手动网格）；/切图 44（同上）；包含“吸附”关键词可强制启用主体吸附分割</span>
+                    </div>
                 </div>
             </div>
 
@@ -372,7 +377,7 @@
                     </div>
                     <div class="quick-item">
                         <span class="quick-name">/快速 表情包 [描述]</span>
-                        <span class="quick-desc">Q版LINE风格表情包{% if enable_sticker_split %}（自动切割）{% endif %}</span>
+                        <span class="quick-desc">Q版LINE风格表情包{% if enable_sticker_split %}（自动切割，智能网格→6x4→吸附兜底）{% endif %}</span>
                         <span class="quick-meta">参数: 4K分辨率，16:9比例。需附带参考图</span>
                     </div>
                 </div>
@@ -432,6 +437,10 @@
                 <div class="tip-item">
                     <div class="tip-icon">🔄</div>
                     <div class="tip-text"><strong>智能重试</strong>: 启用后自动重试失败的请求，确保生成成功率</div>
+                </div>
+                <div class="tip-item">
+                    <div class="tip-icon">✂️</div>
+                    <div class="tip-text"><strong>切图小贴士</strong>: “切图 4 4”“切图 44”手动网格；包含“吸附”可启用主体吸附算法；默认智能网格，失败自动网格/吸附兜底</div>
                 </div>
             </div>
         </div>
