@@ -1523,6 +1523,12 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             if not image:
                 raise ValueError("空的图片地址")
 
+            # 处理 base64 数据
+            if image.startswith("data:image/") and ";base64," in image:
+                return AstrImage(file=image)
+            if self._is_valid_base64_image_str(image):
+                return AstrImage(file=f"base64://{image}")
+
             fs_candidate = image
             if image.startswith("file:///"):
                 fs_candidate = image[8:]
@@ -1633,7 +1639,6 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
 
         # 合并转发
         logger.info("[SEND] 采用合并转发模式")
-        from astrbot.api.message_components import Image as AstrImage
         from astrbot.api.message_components import Node, Plain
 
         node_content = []
@@ -1644,17 +1649,7 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             node_content.append(Plain(f"图片 {idx}:"))
             # 直接使用 Image 组件构建群合并转发节点
             try:
-                img_component = None
-                if img.startswith("file:///"):
-                    fs_path = img[8:]
-                    img_component = AstrImage.fromFileSystem(fs_path)
-                elif os.path.exists(img):
-                    img_component = AstrImage.fromFileSystem(img)
-                elif img.startswith(("http://", "https://")):
-                    img_component = AstrImage.fromURL(img)
-                else:
-                    img_component = AstrImage(file=img)
-
+                img_component = self._build_forward_image_component(img)
                 node_content.append(img_component)
             except Exception as e:
                 logger.warning(f"构造合并转发图片节点失败: {e}")
@@ -2173,8 +2168,14 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                         node_content.append(Plain(f"[切片发送失败]: {file_path}"))
 
                 # 构造单个节点，包含所有图片
+                sender_id = "0"
+                try:
+                    if hasattr(event, "message_obj") and event.message_obj:
+                        sender_id = getattr(event.message_obj, "self_id", "0") or "0"
+                except Exception:
+                    pass
                 node = Node(
-                    uin=event.message_obj.self_id,
+                    uin=sender_id,
                     name="Gemini表情包生成",
                     content=node_content,
                 )
@@ -2551,7 +2552,6 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             prompt=full_prompt,
             reference_images=reference_images,
             avatar_reference=avatar_reference,
-            is_modification=True,
         )
 
         if success and result_data:
