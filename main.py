@@ -28,6 +28,7 @@ from astrbot.core.provider.entities import ProviderType
 
 from .tl import (
     create_zip,
+    ensure_font_downloaded,
     get_template_path,
     render_local_pillow,
     render_text,
@@ -694,6 +695,10 @@ class GeminiImageGenerationPlugin(Star):
 
     async def initialize(self):
         """插件初始化"""
+        # 如果配置为 local 渲染模式，检查并下载字体
+        if self.help_render_mode == "local":
+            asyncio.create_task(self._ensure_font_for_local_mode())
+
         # 启动早期 provider_manager 可能尚未就绪，优先等待 on_astrbot_loaded 再初始化
         if self.api_client:
             logger.debug("initialize 已有 api_client，跳过")
@@ -714,6 +719,13 @@ class GeminiImageGenerationPlugin(Star):
             logger.info("🎨 Gemini 图像生成插件已加载")
         else:
             logger.debug("启动阶段未能初始化 API 客户端，待 on_astrbot_loaded 再补偿")
+
+    async def _ensure_font_for_local_mode(self):
+        """确保 local 渲染模式所需的字体已下载"""
+        try:
+            await ensure_font_downloaded()
+        except Exception as e:
+            logger.warning(f"字体下载任务异常: {e}")
 
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self):

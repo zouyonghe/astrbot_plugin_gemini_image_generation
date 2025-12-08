@@ -3,6 +3,7 @@
 支持三种渲染模式：html (t2i)、local (Pillow)、text (纯文本)
 """
 
+import asyncio
 import io
 import os
 from datetime import datetime
@@ -11,6 +12,126 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from astrbot.api import logger
+
+# 字体下载配置
+FONT_FILENAME = "NotoSansSC-Regular.ttf"
+FONT_DOWNLOAD_URLS = [
+    # Google Fonts CDN (国内可能较慢)
+    "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf",
+    # jsDelivr CDN (国内友好)
+    "https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf",
+    # 备用：使用思源黑体
+    "https://cdn.jsdelivr.net/gh/ArtalkJS/Artalk@main/public/fonts/NotoSansSC-Regular.ttf",
+]
+
+# 全局字体下载状态
+_font_download_lock = asyncio.Lock()
+_font_downloaded = False
+
+
+def _find_existing_font_in_tl() -> Path | None:
+    """检查 tl 目录下是否已存在字体文件（支持 ttf/otf/ttc）"""
+    tl_dir = Path(__file__).parent
+    font_extensions = (".ttf", ".otf", ".ttc")
+    for file in tl_dir.iterdir():
+        if file.is_file() and file.suffix.lower() in font_extensions:
+            # 验证文件大小（字体文件通常大于 100KB）
+            if file.stat().st_size > 100_000:
+                logger.debug(f"在 tl 目录找到现有字体文件: {file.name}")
+                return file
+    return None
+
+
+def _get_font_path() -> Path:
+    """获取字体文件存放路径（优先使用 tl 目录下已有的字体）"""
+    # 先检查 tl 目录下是否已有字体文件
+    existing_font = _find_existing_font_in_tl()
+    if existing_font:
+        return existing_font
+
+    # 使用插件数据目录
+    try:
+        from astrbot.api.star import StarTools
+        data_dir = StarTools.get_data_dir("astrbot_plugin_gemini_image_generation")
+        return data_dir / "fonts" / FONT_FILENAME
+    except Exception:
+        # 回退到模块目录
+        return Path(__file__).parent / FONT_FILENAME
+
+
+async def ensure_font_downloaded() -> bool:
+    """
+    确保字体文件已下载（仅在 local 模式下需要）
+    返回是否成功获取字体
+    """
+    global _font_downloaded
+
+    # 先检查 tl 目录下是否已有字体文件
+    existing_font = _find_existing_font_in_tl()
+    if existing_font:
+        logger.debug(f"使用 tl 目录下现有字体: {existing_font.name}")
+        _font_downloaded = True
+        return True
+
+    font_path = _get_font_path()
+
+    # 如果字体已存在，直接返回
+    if font_path.exists() and font_path.stat().st_size > 1_000_000:  # 至少 1MB
+        _font_downloaded = True
+        return True
+
+    # 检查系统字体是否可用
+    system_fonts = [
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+    ]
+    for sys_font in system_fonts:
+        if os.path.exists(sys_font):
+            logger.debug(f"检测到系统字体: {sys_font}，跳过下载")
+            _font_downloaded = True
+            return True
+
+    async with _font_download_lock:
+        # 双重检查
+        if font_path.exists() and font_path.stat().st_size > 1_000_000:
+            _font_downloaded = True
+            return True
+
+        logger.info("🔤 local 渲染模式需要中文字体，开始下载...")
+        font_path.parent.mkdir(parents=True, exist_ok=True)
+
+        import aiohttp
+
+        for url in FONT_DOWNLOAD_URLS:
+            try:
+                logger.debug(f"尝试下载字体: {url}")
+                timeout = aiohttp.ClientTimeout(total=60, connect=10)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            logger.debug(f"下载失败: HTTP {resp.status}")
+                            continue
+
+                        data = await resp.read()
+                        if len(data) < 1_000_000:  # 字体文件应该大于 1MB
+                            logger.debug(f"下载的文件过小: {len(data)} bytes")
+                            continue
+
+                        with open(font_path, "wb") as f:
+                            f.write(data)
+
+                        logger.info(f"✓ 字体下载成功: {font_path} ({len(data) / 1024 / 1024:.1f}MB)")
+                        _font_downloaded = True
+                        return True
+
+            except Exception as e:
+                logger.debug(f"下载字体失败 ({url}): {e}")
+                continue
+
+        logger.warning("⚠️ 字体下载失败，将使用系统默认字体（中文可能显示异常）")
+        return False
 
 
 def get_template_path(
@@ -79,14 +200,24 @@ def render_text(template_data: dict) -> str:
 
 def _load_font(size: int):
     """加载字体"""
-    builtin_font = Path(__file__).parent / "NotoSansSC-Regular.ttf"
-    font_paths = [
-        str(builtin_font),
+    # 优先检查 tl 目录下的现有字体
+    existing_font = _find_existing_font_in_tl()
+    font_paths = []
+    if existing_font:
+        font_paths.append(str(existing_font))
+
+    # 添加下载的字体路径
+    downloaded_font = _get_font_path()
+    if str(downloaded_font) not in font_paths:
+        font_paths.append(str(downloaded_font))
+
+    # 系统字体作为回退
+    font_paths.extend([
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/System/Library/Fonts/PingFang.ttc",
         "C:/Windows/Fonts/msyh.ttc",
-    ]
+    ])
     for fp in font_paths:
         if os.path.exists(fp):
             try:

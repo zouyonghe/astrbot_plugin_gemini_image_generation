@@ -1,3 +1,4 @@
+from .help_renderer import ensure_font_downloaded as ensure_font_downloaded
 from .help_renderer import get_template_path as get_template_path
 from .help_renderer import render_local_pillow as render_local_pillow
 from .help_renderer import render_text as render_text
