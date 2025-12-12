@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -9,6 +13,7 @@ import aiohttp
 from astrbot.api import logger
 
 from ..api_types import APIError, ApiRequestConfig
+from ..tl_utils import save_base64_image
 from .base import ProviderRequest
 
 
@@ -124,6 +129,14 @@ class GoogleProvider:
                     )
                     continue
 
+                if not is_valid:
+                    fail_reasons.append(f"图片{idx+1}: base64校验失败")
+                    logger.debug(
+                        "[google] 参考图 idx=%s base64 校验失败且非URL，跳过",
+                        idx,
+                    )
+                    continue
+
                 mime_type = client._ensure_mime_type(mime_type)
                 logger.debug(
                     "[google] 成功处理参考图 idx=%s mime=%s size=%s",
@@ -234,13 +247,6 @@ class GoogleProvider:
         response_data: dict[str, Any],
         session: aiohttp.ClientSession,
     ) -> tuple[list[str], list[str], str | None, str | None]:  # noqa: ANN401
-        import asyncio
-        import base64
-        import tempfile
-        from pathlib import Path
-
-        from ..tl_utils import save_base64_image
-
         parse_start = asyncio.get_event_loop().time()
         logger.debug("🔍 开始解析API响应数据...")
 
@@ -334,16 +340,17 @@ class GoogleProvider:
                                 image_urls.append(saved_path)
                             else:
                                 try:
-                                    tmp_path = Path(
-                                        tempfile.mktemp(
-                                            prefix="gem_inline_", suffix=".png"
-                                        )
-                                    )
-                                    cleaned = base64_data.strip().replace("\n", "")
-                                    if ";base64," in cleaned:
-                                        _, _, cleaned = cleaned.partition(";base64,")
-                                    raw = base64.b64decode(cleaned, validate=False)
-                                    tmp_path.write_bytes(raw)
+                                    with tempfile.NamedTemporaryFile(
+                                        prefix="gem_inline_",
+                                        suffix=f".{image_format}",
+                                        delete=False,
+                                    ) as tmp_file:
+                                        tmp_path = Path(tmp_file.name)
+                                        cleaned = base64_data.strip().replace("\n", "")
+                                        if ";base64," in cleaned:
+                                            _, _, cleaned = cleaned.partition(";base64,")
+                                        raw = base64.b64decode(cleaned, validate=False)
+                                        tmp_file.write(raw)
                                     image_paths.append(str(tmp_path))
                                     image_urls.append(str(tmp_path))
                                     logger.debug(

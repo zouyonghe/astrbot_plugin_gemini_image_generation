@@ -252,7 +252,7 @@ class OpenAICompatProvider:
             "model": config.model,
             "messages": [{"role": "user", "content": message_content}],
             "max_tokens": config.max_tokens,
-            "temperature": 0.7,
+            "temperature": config.temperature if config.temperature is not None else 0.7,
             "modalities": ["image", "text"],
             "stream": False,
         }
@@ -269,30 +269,16 @@ class OpenAICompatProvider:
             or config.force_resolution
         )
 
-        if (config.api_type or "").lower() == "zai":
-            generation_config: dict[str, Any] = {}
+        image_config: dict[str, Any] = {}
 
-            if config.resolution:
-                payload[resolution_key] = config.resolution
-                generation_config[resolution_key] = config.resolution
+        if config.aspect_ratio:
+            image_config[aspect_ratio_key] = config.aspect_ratio
 
-            if config.aspect_ratio:
-                payload[aspect_ratio_key] = config.aspect_ratio
-                generation_config[aspect_ratio_key] = config.aspect_ratio
+        if is_gemini_image_model and config.resolution:
+            image_config[resolution_key] = config.resolution
 
-            if generation_config:
-                payload["generation_config"] = generation_config
-        else:
-            image_config: dict[str, Any] = {}
-
-            if config.aspect_ratio:
-                image_config[aspect_ratio_key] = config.aspect_ratio
-
-            if is_gemini_image_model and config.resolution:
-                image_config[resolution_key] = config.resolution
-
-            if image_config:
-                payload["image_config"] = image_config
+        if image_config:
+            payload["image_config"] = image_config
 
         if is_gemini_image_model and config.enable_grounding:
             payload["tools"] = [{"google_search": {}}]

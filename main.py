@@ -866,14 +866,17 @@ class GeminiImageGenerationPlugin(Star):
                     "✗ AstrBot 加载完成后仍未初始化 API 客户端，请检查提供商配置"
                 )
 
-    def _ensure_api_client(self) -> bool:
+    def _ensure_api_client(self, *, quiet: bool = False) -> bool:
         """确保 API 客户端已初始化，启动初期 provider_mgr 可能尚未就绪"""
         if self.api_client:
             logger.debug("api_client 已就绪")
             return True
-        self._load_provider_from_context(quiet=True)
+        self._load_provider_from_context(quiet=quiet)
         if not self.api_client:
-            logger.error("✗ API 客户端仍未初始化，请检查 AstrBot 提供商配置")
+            if quiet:
+                logger.debug("API 客户端仍未初始化（quiet=True，跳过错误日志）")
+            else:
+                logger.error("✗ API 客户端仍未初始化，请检查 AstrBot 提供商配置")
             return False
         return True
 
@@ -888,9 +891,9 @@ class GeminiImageGenerationPlugin(Star):
         manual_model = (api_settings.get("model") or "").strip()
 
         # 只按配置文件决定 API 类型
-        if manual_api_type:
+        if manual_api_type and not self.api_type:
             self.api_type = manual_api_type
-        else:
+        elif not self.api_type:
             if not quiet:
                 logger.error(
                     "✗ 未配置 api_settings.api_type（google/openai/zai），无法初始化 API 客户端"
@@ -1730,7 +1733,7 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                     event.plain_result(
                         "❌ 未能成功生成图像。\n"
                         "🧐 可能原因：模型返回空结果、提示词冲突或参考图处理异常。\n"
-                        "✅ 建议：简化描述、减少参考图数量后再试，或稍后重试。"
+                        "✅ 建议：简化描述、减少参考图后重试，或稍后重试。"
                     ),
                 ):
                     yield res
@@ -1892,7 +1895,7 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             self.log_debug(f"  - 是否改图请求: {is_modification_request}")
             self.log_debug(f"  - 模型: {self.model}")
 
-            yield event.plain_result("🎨 生成中...")
+            yield event.plain_result("🎨  生成中...")
 
             (
                 image_urls,
