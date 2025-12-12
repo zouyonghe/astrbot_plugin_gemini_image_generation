@@ -99,7 +99,7 @@
 
 **api_settings**
 - `provider_id`：必填，从 AstrBot 提供商中选择生图模型。
-- `api_type`：可选，覆盖提供商类型（google/openai）。
+- `api_type`：可选，覆盖提供商类型（google/openai/zai）。选择 `zai` 时启用 Zai 兼容参数传递（顶层分辨率/比例 + generation_config）。
 - `model`：可选，覆盖提供商模型名称。
 - `vision_provider_id`：可选，切图前调用视觉模型识别网格行列；留空则跳过 AI 识别。
 

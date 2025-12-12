@@ -14,12 +14,13 @@
       "api_type": {
         "description": "API 类型（可选）",
         "type": "string",
-        "hint": "可选覆盖提供商类型，默认随 AstrBot 提供商自动识别",
+        "hint": "可选覆盖提供商类型，默认随 AstrBot 提供商自动识别。选择 zai 时使用 Zai 兼容参数传递",
         "default": "",
         "options": [
           "",
           "google",
-          "openai"
+          "openai",
+          "zai"
         ]
       },
       "model": {

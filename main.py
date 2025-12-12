@@ -153,6 +153,11 @@ class GeminiImageGenerationPlugin(Star):
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
             logger.debug("定时清理任务已停止")
+        if self.api_client and hasattr(self.api_client, "close"):
+            try:
+                await self.api_client.close()
+            except Exception as e:
+                logger.debug(f"关闭 API 会话失败: {e}")
         logger.info("🎨 Gemini 图像生成插件已卸载")
 
     def get_tool_timeout(self, event: AstrMessageEvent | None = None) -> int:
@@ -177,18 +182,15 @@ class GeminiImageGenerationPlugin(Star):
 
     async def get_avatar_reference(self, event: AstrMessageEvent) -> list[str]:
         """获取头像作为参考图像，支持用户头像（直接HTTP下载）"""
-        avatar_images = []
-        download_tasks = []
+        avatar_images: list[str] = []
+        download_tasks: list[asyncio.Task | asyncio.Future] = []
 
-        try:
-            # 检查是否需要获取群头像
-            if hasattr(event, "group_id") and event.group_id:
+        # 仅包裹群头像关键词解析，避免小错误影响后续头像获取
+        if hasattr(event, "group_id") and event.group_id:
+            try:
                 group_id = str(event.group_id)
-                prompt = event.wessage_str.lower()
+                prompt = (getattr(event, "message_str", "") or "").lower()
 
-                # 群头像获取的几种情况：
-                # 1. 明确提到群相关关键词
-                # 2. 在群聊中且启用了自动头像参考且触发了生图指令
                 group_avatar_keywords = [
                     "群头像",
                     "本群",
@@ -201,7 +203,6 @@ class GeminiImageGenerationPlugin(Star):
                     keyword in prompt for keyword in group_avatar_keywords
                 )
 
-                # 判断是否应该获取群头像
                 should_get_group_avatar = explicit_group_request or (
                     self.auto_avatar_reference
                     and any(
@@ -227,66 +228,50 @@ class GeminiImageGenerationPlugin(Star):
                         logger.debug(
                             f"群聊中生图指令触发，自动获取群 {group_id} 的头像作为参考"
                         )
-
-                    # 群头像暂时跳过，因为QQ群头像需要特殊API
                     logger.debug("群头像功能暂未实现，跳过")
+            except Exception as e:
+                logger.debug(f"群头像关键词解析失败: {e}")
 
-            # 获取头像逻辑
-            # 获取头像：优先获取@用户头像，如果无@用户则获取发送者头像
-            mentioned_users = await self.parse_mentions(event)
+        # 获取头像：优先获取@用户头像，如果无@用户则获取发送者头像
+        mentioned_users = await self.parse_mentions(event)
 
-            if mentioned_users:
-                # 有@用户：只获取被@用户的头像
-                for user_id in mentioned_users:
-                    logger.debug(f"获取@用户头像: {user_id}")
-                    download_tasks.append(
-                        download_qq_avatar(
-                            str(user_id), f"mentioned_{user_id}", event=event
-                        )
-                    )
-            else:
-                # 无@用户：获取发送者头像
-                if (
-                    hasattr(event, "message_obj")
-                    and hasattr(event.message_obj, "sender")
-                    and hasattr(event.message_obj.sender, "user_id")
-                ):
-                    sender_id = str(event.message_obj.sender.user_id)
-                    logger.debug(f"获取发送者头像: {sender_id}")
-                    download_tasks.append(
-                        download_qq_avatar(
-                            sender_id, f"sender_{sender_id}", event=event
-                        )
-                    )
+        if mentioned_users:
+            for user_id in mentioned_users:
+                logger.debug(f"获取@用户头像: {user_id}")
+                download_tasks.append(
+                    download_qq_avatar(str(user_id), f"mentioned_{user_id}", event=event)
+                )
+        else:
+            if (
+                hasattr(event, "message_obj")
+                and hasattr(event.message_obj, "sender")
+                and hasattr(event.message_obj.sender, "user_id")
+            ):
+                sender_id = str(event.message_obj.sender.user_id)
+                logger.debug(f"获取发送者头像: {sender_id}")
+                download_tasks.append(
+                    download_qq_avatar(sender_id, f"sender_{sender_id}", event=event)
+                )
 
-            # 执行下载任务
-            if download_tasks:
-                logger.debug(f"开始并发下载 {len(download_tasks)} 个头像...")
-                try:
-                    # 设置总体超时时间为8秒，避免单个下载拖慢整体
-                    results = await asyncio.wait_for(
-                        asyncio.gather(*download_tasks, return_exceptions=True),
-                        timeout=8.0,
-                    )
-
-                    # 处理结果
-                    for result in results:
-                        if isinstance(result, str) and result:
-                            avatar_images.append(result)
-                        elif isinstance(result, Exception):
-                            logger.warning(f"头像下载任务失败: {result}")
-
-                    logger.debug(
-                        f"头像下载完成，成功获取 {len(avatar_images)} 个头像，即将返回"
-                    )
-
-                except asyncio.TimeoutError:
-                    logger.warning("头像下载总体超时，跳过剩余头像下载")
-                except Exception as e:
-                    logger.warning(f"并发下载头像时发生错误: {e}")
-
-        except Exception as e:
-            logger.warning(f"获取头像参考失败: {e}")
+        if download_tasks:
+            logger.debug(f"开始并发下载 {len(download_tasks)} 个头像...")
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*download_tasks, return_exceptions=True),
+                    timeout=8.0,
+                )
+                for result in results:
+                    if isinstance(result, str) and result:
+                        avatar_images.append(result)
+                    elif isinstance(result, Exception):
+                        logger.warning(f"头像下载任务失败: {result}")
+                logger.debug(
+                    f"头像下载完成，成功获取 {len(avatar_images)} 个头像，即将返回"
+                )
+            except asyncio.TimeoutError:
+                logger.warning("头像下载总体超时，跳过剩余头像下载")
+            except Exception as e:
+                logger.warning(f"并发下载头像时发生错误: {e}")
 
         return avatar_images
 
@@ -1351,6 +1336,8 @@ class GeminiImageGenerationPlugin(Star):
         prompt: str,
         reference_images: list[str],
         avatar_reference: list[str],
+        override_resolution: str | None = None,
+        override_aspect_ratio: str | None = None,
     ) -> tuple[bool, tuple[list[str], list[str], str | None, str | None] | str]:
         """
         内部核心图像生成方法，不发送消息，只返回结果
@@ -1394,13 +1381,23 @@ class GeminiImageGenerationPlugin(Star):
 The last {final_avatar_count} image(s) provided are User Avatars (marked as optional reference). You may use them for character consistency if needed, but they are NOT mandatory if they conflict with the requested style."""
 
         response_modalities = "TEXT_IMAGE" if self.enable_text_response else "IMAGE"
+        effective_resolution = (
+            override_resolution
+            if override_resolution is not None
+            else self.resolution
+        )
+        effective_aspect_ratio = (
+            override_aspect_ratio
+            if override_aspect_ratio is not None
+            else self.aspect_ratio
+        )
         request_config = ApiRequestConfig(
             model=self.model,
             prompt=prompt,
             api_type=self.api_type,
             api_base=self.api_base,
-            resolution=self.resolution,
-            aspect_ratio=self.aspect_ratio,
+            resolution=effective_resolution,
+            aspect_ratio=effective_aspect_ratio,
             enable_grounding=self.enable_grounding,
             response_modalities=response_modalities,
             reference_images=all_reference_images if all_reference_images else None,
@@ -1776,6 +1773,8 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         prompt: str,
         use_avatar: bool = False,
         skip_figure_enhance: bool = False,
+        override_resolution: str | None = None,
+        override_aspect_ratio: str | None = None,
     ):
         """快捷图像生成"""
         if not self._ensure_api_client():
@@ -1804,8 +1803,16 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                 prompt, skip_figure_enhance=skip_figure_enhance
             )
 
-            effective_resolution = self.resolution
-            effective_aspect_ratio = self.aspect_ratio
+            effective_resolution = (
+                override_resolution
+                if override_resolution is not None
+                else self.resolution
+            )
+            effective_aspect_ratio = (
+                override_aspect_ratio
+                if override_aspect_ratio is not None
+                else self.aspect_ratio
+            )
 
             if (
                 self.preserve_reference_image_size
@@ -1932,13 +1939,7 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         yield event.plain_result(f"🎨 使用{mode_name}模式生成图像...")
         api_start_time = time.perf_counter()
 
-        old_resolution = self.resolution
-        old_aspect_ratio = self.aspect_ratio
-
         try:
-            self.resolution = resolution
-            self.aspect_ratio = aspect_ratio
-
             # 使用新提示词函数
             if prompt_func:
                 full_prompt = prompt_func(prompt)
@@ -1949,13 +1950,16 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             use_avatar = await self.should_use_avatar_for_prompt(event, prompt)
 
             async for result in self._quick_generate_image(
-                event, full_prompt, use_avatar, **kwargs
+                event,
+                full_prompt,
+                use_avatar,
+                override_resolution=resolution,
+                override_aspect_ratio=aspect_ratio,
+                **kwargs,
             ):
                 yield result
 
         finally:
-            self.resolution = old_resolution
-            self.aspect_ratio = old_aspect_ratio
             async for res in self._send_api_duration(event, api_start_time):
                 yield res
 
@@ -2073,19 +2077,14 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                 if simple_mode
                 else get_sticker_prompt(user_prompt)
             )
-            old_resolution = self.resolution
-            old_aspect_ratio = self.aspect_ratio
-
-            try:
-                self.resolution = "4K"
-                self.aspect_ratio = "16:9"
-                async for result in self._quick_generate_image(
-                    event, full_prompt, use_avatar
-                ):
-                    yield result
-            finally:
-                self.resolution = old_resolution
-                self.aspect_ratio = old_aspect_ratio
+            async for result in self._quick_generate_image(
+                event,
+                full_prompt,
+                use_avatar,
+                override_resolution="4K",
+                override_aspect_ratio="16:9",
+            ):
+                yield result
             return
 
         # 开启了切割功能，执行自定义逻辑
@@ -2095,13 +2094,7 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             else get_sticker_prompt(user_prompt)
         )
         api_start_time = time.perf_counter()
-        old_resolution = self.resolution
-        old_aspect_ratio = self.aspect_ratio
-
         try:
-            self.resolution = "4K"
-            self.aspect_ratio = "16:9"
-
             # 调用生图核心逻辑，但截获结果不直接发送
             sent_success = False
             split_files: list[str] = []
@@ -2111,6 +2104,8 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                 prompt=full_prompt,
                 reference_images=reference_images,
                 avatar_reference=avatar_reference,
+                override_resolution="4K",
+                override_aspect_ratio="16:9",
             )
             api_duration = time.perf_counter() - api_start_time
 
@@ -2156,7 +2151,17 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                 split_files: list[str] = []
                 if self.enable_llm_crop:
                     split_files = await self._llm_detect_and_split(primary_image_path)
-                if not split_files:
+                    if not split_files:
+                        split_files = await asyncio.to_thread(
+                            split_image,
+                            primary_image_path,
+                            rows=6,
+                            cols=4,
+                            use_sticker_cutter=True,
+                            ai_rows=ai_rows,
+                            ai_cols=ai_cols,
+                        )
+                else:
                     split_files = await asyncio.to_thread(
                         split_image,
                         primary_image_path,
@@ -2276,8 +2281,6 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                     yield res
 
         finally:
-            self.resolution = old_resolution
-            self.aspect_ratio = old_aspect_ratio
             try:
                 await self.avatar_manager.cleanup_used_avatars()
             except Exception:

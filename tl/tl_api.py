@@ -162,6 +162,24 @@ class GeminiAPIClient:
             logger.debug(f"检测到代理配置，使用代理: {self.proxy}")
         logger.debug(f"API 客户端已初始化，支持 {len(self.api_keys)} 个 API 密钥")
         self.verbose_logging: bool = False
+        self._session: aiohttp.ClientSession | None = None
+        self._session_lock = asyncio.Lock()
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """获取或创建可复用的 aiohttp 会话"""
+        if self._session and not self._session.closed:
+            return self._session
+        async with self._session_lock:
+            if self._session and not self._session.closed:
+                return self._session
+            self._session = aiohttp.ClientSession()
+            return self._session
+
+    async def close(self):
+        """关闭内部复用的 aiohttp 会话"""
+        if self._session and not self._session.closed:
+            await self._session.close()
+        self._session = None
 
     @staticmethod
     def _coerce_supported_image_bytes(
@@ -591,9 +609,6 @@ class GeminiAPIClient:
             "stream": False,
         }
 
-        # image_config 与 Gemini 3 Pro Image 模型相关的配置
-        image_config: dict[str, Any] = {}
-
         # 获取自定义参数名（支持不同 API 的命名差异）
         # 先 strip 再检查是否为空，避免空格字符串导致空键
         _res_key = (config.resolution_param_name or "").strip()
@@ -601,40 +616,40 @@ class GeminiAPIClient:
         _aspect_key = (config.aspect_ratio_param_name or "").strip()
         aspect_ratio_key = _aspect_key if _aspect_key else "aspect_ratio"
 
-        # 设置长宽比（支持任意自定义比例）
-        if config.aspect_ratio:
-            image_config[aspect_ratio_key] = config.aspect_ratio
-
-        # 仅在 Gemini 3 Pro Image 系列模型下传递分辨率到 image_config
+        # 仅在 Gemini 3 Pro Image 系列模型下传递分辨率到 image_config（除非 force_resolution）
         model_name = (config.model or "").lower()
         is_gemini_image_model = (
             "gemini-3-pro-image" in model_name
             or "gemini-3-pro-preview" in model_name
-            or config.force_resolution  # 如果强制开启，则忽略模型名称检查
+            or config.force_resolution
         )
 
-        if is_gemini_image_model and config.resolution:
-            # 前端 router 侧直接传递 "1K"/"2K"/"4K"，这里保持一致
-            image_config[resolution_key] = config.resolution
+        if config.api_type == "zai":
+            # Zai 兼容模式：按顶层字段 + generation_config 发送（参考 openai_chat_client.py）
+            generation_config: dict[str, Any] = {}
 
-        if image_config:
-            payload["image_config"] = image_config
+            if config.resolution:
+                payload[resolution_key] = config.resolution
+                generation_config[resolution_key] = config.resolution
 
-        # 兼容 openai_chat_client.py 风格的顶层与 generation_config 参数
-        # 仅当用户显式将参数名设置为 image_resolution/image_aspect_ratio 时启用，
-        # 避免对其他 OpenAI 官方/兼容服务引入未知字段。
-        generation_config: dict[str, Any] = {}
+            if config.aspect_ratio:
+                payload[aspect_ratio_key] = config.aspect_ratio
+                generation_config[aspect_ratio_key] = config.aspect_ratio
 
-        if resolution_key == "image_resolution" and config.resolution:
-            generation_config["image_resolution"] = config.resolution
-            payload["image_resolution"] = config.resolution
+            if generation_config:
+                payload["generation_config"] = generation_config
+        else:
+            # 默认模式：使用 image_config 对象
+            image_config: dict[str, Any] = {}
 
-        if aspect_ratio_key == "image_aspect_ratio" and config.aspect_ratio:
-            generation_config["image_aspect_ratio"] = config.aspect_ratio
-            payload["image_aspect_ratio"] = config.aspect_ratio
+            if config.aspect_ratio:
+                image_config[aspect_ratio_key] = config.aspect_ratio
 
-        if generation_config:
-            payload["generation_config"] = generation_config
+            if is_gemini_image_model and config.resolution:
+                image_config[resolution_key] = config.resolution
+
+            if image_config:
+                payload["image_config"] = image_config
 
         # 与前端 router 一致：启用搜索接地时，通过 tools.google_search 控制
         if is_gemini_image_model and config.enable_grounding:
@@ -887,17 +902,21 @@ class GeminiAPIClient:
         current_retry = 0
         last_error = None
 
+        session = await self._get_session()
+        timeout_cfg = aiohttp.ClientTimeout(total=total_timeout, sock_read=total_timeout)
+
         while current_retry < max_retries:
             try:
-                # 每个重试使用独立的超时控制，不共享总超时时间
-                timeout = aiohttp.ClientTimeout(
-                    total=total_timeout, sock_read=total_timeout
+                logger.debug(f"发送请求（重试 {current_retry}/{max_retries - 1}）")
+                return await self._perform_request(
+                    session,
+                    url,
+                    payload,
+                    headers,
+                    api_type,
+                    model,
+                    timeout=timeout_cfg,
                 )
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    logger.debug(f"发送请求（重试 {current_retry}/{max_retries - 1}）")
-                    return await self._perform_request(
-                        session, url, payload, headers, api_type, model
-                    )
 
             except asyncio.CancelledError:
                 # 只有框架取消才不重试（这是最顶层的超时）
@@ -978,6 +997,8 @@ class GeminiAPIClient:
         headers: dict[str, str],
         api_type: str,
         model: str,
+        *,
+        timeout: aiohttp.ClientTimeout | None = None,
     ) -> tuple[list[str], list[str], str | None, str | None]:
         """执行实际的HTTP请求"""
         logger.debug(
@@ -989,7 +1010,11 @@ class GeminiAPIClient:
         )
 
         async with session.post(
-            url, json=payload, headers=headers, proxy=self.proxy
+            url,
+            json=payload,
+            headers=headers,
+            proxy=self.proxy,
+            timeout=timeout,
         ) as response:
             logger.debug(f"响应状态: {response.status}")
             response_text = await response.text()
