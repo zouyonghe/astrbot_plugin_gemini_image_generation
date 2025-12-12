@@ -12,12 +12,11 @@
         "default": ""
       },
       "api_type": {
-        "description": "API 类型（可选）",
+        "description": "API 类型（必选）",
         "type": "string",
-        "hint": "可选覆盖提供商类型，默认随 AstrBot 提供商自动识别。选择 zai 时使用 Zai 兼容参数传递",
-        "default": "",
+        "hint": "必须选择 API 类型（google/openai/zai）。选择 zai 时使用 Zai 兼容参数传递",
+        "default": "openai",
         "options": [
-          "",
           "google",
           "openai",
           "zai"
@@ -83,6 +82,12 @@
         "type": "bool",
         "hint": "在启用切割的同时，生成并发送表情包压缩文件(zip)。若发送失败将降级使用合并转发",
         "default": false
+      },
+      "sticker_grid": {
+        "description": "表情包提示词网格",
+        "type": "string",
+        "hint": "仅影响“表情包”指令生成提示词中的网格描述。格式如 4x4（建议范围 1-20）",
+        "default": "4x4"
       },
       "preserve_reference_image_size": {
         "description": "改图保留参考图尺寸",

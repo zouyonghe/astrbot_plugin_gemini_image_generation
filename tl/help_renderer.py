@@ -52,6 +52,7 @@ def _get_font_path() -> Path:
     # 使用插件数据目录
     try:
         from astrbot.api.star import StarTools
+
         data_dir = StarTools.get_data_dir("astrbot_plugin_gemini_image_generation")
         return data_dir / "fonts" / FONT_FILENAME
     except Exception:
@@ -122,7 +123,9 @@ async def ensure_font_downloaded() -> bool:
                         with open(font_path, "wb") as f:
                             f.write(data)
 
-                        logger.info(f"✓ 字体下载成功: {font_path} ({len(data) / 1024 / 1024:.1f}MB)")
+                        logger.info(
+                            f"✓ 字体下载成功: {font_path} ({len(data) / 1024 / 1024:.1f}MB)"
+                        )
                         _font_downloaded = True
                         return True
 
@@ -216,12 +219,14 @@ def _load_font(size: int):
         font_paths.append(str(downloaded_font))
 
     # 系统字体作为回退
-    font_paths.extend([
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
-        "C:/Windows/Fonts/msyh.ttc",
-    ])
+    font_paths.extend(
+        [
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "C:/Windows/Fonts/msyh.ttc",
+        ]
+    )
     for fp in font_paths:
         if os.path.exists(fp):
             try:

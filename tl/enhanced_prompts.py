@@ -52,10 +52,10 @@ def get_mobile_prompt(prompt: str) -> str:
     return base_prompt
 
 
-def get_sticker_prompt(prompt: str = "") -> str:
+def get_sticker_prompt(prompt: str = "", *, rows: int = 4, cols: int = 4) -> str:
     """获取表情包提示词"""
-    base_prompt = """为我生成图中角色的绘制 Q 版的，LINE 风格的半身像表情包，注意头饰要正确
-彩色手绘风格，严格按照4*4布局，均匀分布，白色背景，涵盖各种各样的常用聊天语句，或是一些有关的娱乐 meme
+    base_prompt = f"""为我生成图中角色的绘制 Q 版的，LINE 风格的半身像表情包，注意头饰要正确
+彩色手绘风格，严格按照{rows}*{cols}布局，均匀分布，白色背景，涵盖各种各样的常用聊天语句，或是一些有关的娱乐 meme
 其他需求：不要原图复制，高清修复，高质量。所有标注为手写的简体中文。
 """
 
@@ -175,11 +175,13 @@ def enhance_prompt_for_figure(prompt: str) -> str:
     return get_figure_prompt(prompt, style_type=1)
 
 
-def get_q_version_sticker_prompt(prompt: str = "") -> str:
+def get_q_version_sticker_prompt(
+    prompt: str = "", *, rows: int = 4, cols: int = 4
+) -> str:
     """英文版Q版表情包提示词"""
-    base_prompt = """Generate a Q version drawing of the characters in the image, in LINE style, with half-body expressions, ensuring the headgear is correct.
+    base_prompt = f"""Generate a Q version drawing of the characters in the image, in LINE style, with half-body expressions, ensuring the headgear is correct.
 
-Color hand-drawn style, strictly following a 4*4 layout with uniform spacing and even distribution. White background. Cover a variety of commonly used chat phrases and related entertainment memes.
+Color hand-drawn style, strictly following a {rows}*{cols} layout with uniform spacing and even distribution. White background. Cover a variety of commonly used chat phrases and related entertainment memes.
 
 Layout requirements:
 - Ensure each sticker is evenly spaced across the grid
