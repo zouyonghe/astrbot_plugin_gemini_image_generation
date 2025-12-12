@@ -139,7 +139,11 @@ def get_template_path(
     theme_settings: dict,
     extension: str = ".html",
 ) -> Path:
-    """根据主题配置获取模板路径"""
+    """
+    根据主题配置获取模板路径
+
+    如果指定模板不存在，会回退到默认的 light 模板，并自动补全缺失的扩展名。
+    """
     mode = theme_settings.get("mode", "cycle")
     cycle_config = theme_settings.get("cycle_config", {})
     single_config = theme_settings.get("single_config", {})
