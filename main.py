@@ -1601,22 +1601,36 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         if not self.vision_provider_id:
             return None
 
+        # 视觉识别前确保拿到可读取的本地文件路径（URL 需要先下载）
+        local_path = image_path
+        if isinstance(image_path, str) and image_path.startswith(("http://", "https://")):
+            try:
+                if self.api_client and hasattr(self.api_client, "_get_session"):
+                    session = await self.api_client._get_session()
+                    _, downloaded = await self.api_client._download_image(
+                        image_path, session, use_cache=False
+                    )
+                    if downloaded and Path(downloaded).exists():
+                        local_path = downloaded
+            except Exception as e:
+                logger.debug(f"[GRID_DETECT] 下载图片失败，回退使用原始URL: {e}")
+
         try:
-            with PILImage.open(image_path) as img:
+            with PILImage.open(local_path) as img:
                 width, height = img.size
                 max_side = max(width, height)
-                vision_input_path = image_path
+                vision_input_path = local_path
                 if max_side > 1200:
                     ratio = 1200 / max_side
                     new_w = int(width * ratio)
                     new_h = int(height * ratio)
                     img = img.resize((new_w, new_h))
-                    tmp_path = Path("/tmp") / f"grid_detect_{Path(image_path).stem}.png"
+                    tmp_path = Path("/tmp") / f"grid_detect_{Path(local_path).stem}.png"
                     img.save(tmp_path, format="PNG")
                     vision_input_path = str(tmp_path)
         except Exception as e:
             logger.debug(f"[GRID_DETECT] 读取/压缩图片失败，使用原图: {e}")
-            vision_input_path = image_path
+            vision_input_path = local_path
 
         prompt = get_grid_detect_prompt()
 
@@ -2223,6 +2237,34 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                     "✅ 建议：检查日志后重试，或更换模型/提示词。"
                 )
                 return
+
+            # 表情包切割依赖本地文件路径：如果上游只返回了 URL，先下载到本地
+            primary_source = primary_image_path
+            if primary_image_path.startswith(("http://", "https://")):
+                try:
+                    if self.api_client and hasattr(self.api_client, "_get_session"):
+                        session = await self.api_client._get_session()
+                        _, downloaded = await self.api_client._download_image(
+                            primary_image_path, session, use_cache=False
+                        )
+                        if downloaded and Path(downloaded).exists():
+                            primary_image_path = downloaded
+                        else:
+                            raise RuntimeError("下载结果为空")
+                    else:
+                        raise RuntimeError("API 客户端不可用")
+                except Exception as e:
+                    logger.warning(f"表情源图下载失败: {e}")
+                    yield event.plain_result(
+                        "❌ 表情源图为远程链接，但下载到本地失败，无法切割。\n"
+                        "🧐 可能原因：图片链接临时失效/网络受限/上游防盗链。\n"
+                        "✅ 建议：稍后重试，或在群内直接发送图片再试。"
+                    )
+                    async for res in self._safe_send(
+                        event, event.image_result(primary_source)
+                    ):
+                        yield res
+                    return
 
             ai_rows = None
             ai_cols = None
