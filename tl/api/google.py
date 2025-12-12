@@ -61,6 +61,7 @@ class GoogleProvider:
         client: Any,
         response_data: dict[str, Any],
         session: aiohttp.ClientSession,
+        api_base: str | None = None,
     ) -> tuple[list[str], list[str], str | None, str | None]:  # noqa: ANN401
         # 解析逻辑在本文件内实现，但会复用 client 上的通用能力。
         return await self._parse_gresponse(
@@ -130,7 +131,7 @@ class GoogleProvider:
                     continue
 
                 if not is_valid:
-                    fail_reasons.append(f"图片{idx+1}: base64校验失败")
+                    fail_reasons.append(f"图片{idx + 1}: base64校验失败")
                     logger.debug(
                         "[google] 参考图 idx=%s base64 校验失败且非URL，跳过",
                         idx,
@@ -348,7 +349,9 @@ class GoogleProvider:
                                         tmp_path = Path(tmp_file.name)
                                         cleaned = base64_data.strip().replace("\n", "")
                                         if ";base64," in cleaned:
-                                            _, _, cleaned = cleaned.partition(";base64,")
+                                            _, _, cleaned = cleaned.partition(
+                                                ";base64,"
+                                            )
                                         raw = base64.b64decode(cleaned, validate=False)
                                         tmp_file.write(raw)
                                     image_paths.append(str(tmp_path))

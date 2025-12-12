@@ -64,10 +64,32 @@ class OpenAICompatProvider:
         client: Any,
         response_data: dict[str, Any],
         session: aiohttp.ClientSession,
+        api_base: str | None = None,
     ) -> tuple[list[str], list[str], str | None, str | None]:  # noqa: ANN401
         return await self._parse_openai_response(
-            client=client, response_data=response_data, session=session
+            client=client,
+            response_data=response_data,
+            session=session,
+            api_base=api_base,
         )
+
+    async def _handle_special_candidate_url(
+        self,
+        *,
+        client: Any,
+        session: aiohttp.ClientSession,
+        candidate_url: str,
+        image_urls: list[str],
+        image_paths: list[str],
+        api_base: str | None,
+        state: dict[str, Any],
+    ) -> bool:  # noqa: ANN401
+        """子类钩子：处理特殊图片 URL（如相对路径/临时缓存），返回是否已处理。"""
+        return False
+
+    def _find_additional_image_urls_in_text(self, text: str) -> list[str]:
+        """子类钩子：从文本中额外提取图片链接（默认不提取）。"""
+        return []
 
     async def _prepare_payload(
         self, *, client: Any, config: ApiRequestConfig
@@ -252,7 +274,9 @@ class OpenAICompatProvider:
             "model": config.model,
             "messages": [{"role": "user", "content": message_content}],
             "max_tokens": config.max_tokens,
-            "temperature": config.temperature if config.temperature is not None else 0.7,
+            "temperature": config.temperature
+            if config.temperature is not None
+            else 0.7,
             "modalities": ["image", "text"],
             "stream": False,
         }
@@ -291,6 +315,7 @@ class OpenAICompatProvider:
         client: Any,
         response_data: dict[str, Any],
         session: aiohttp.ClientSession,
+        api_base: str | None = None,
     ) -> tuple[list[str], list[str], str | None, str | None]:  # noqa: ANN401
         image_urls: list[str] = []
         image_paths: list[str] = []
@@ -298,6 +323,7 @@ class OpenAICompatProvider:
         thought_signature = None
         fail_reasons: list[str] = []
         fallback_texts = client._collect_fallback_texts(response_data)
+        special_state: dict[str, Any] = {}
 
         message: dict[str, Any] | None = None
         if "choices" in response_data and response_data["choices"]:
@@ -372,16 +398,34 @@ class OpenAICompatProvider:
                 ):
                     image_url, image_path = await client._parse_data_uri(candidate_url)
                 elif isinstance(candidate_url, str):
-                    if candidate_url.startswith("http://") or candidate_url.startswith(
-                        "https://"
+                    cleaned_candidate = (
+                        candidate_url.strip()
+                        .replace("&amp;", "&")
+                        .rstrip(").,;")
+                        .strip("'\"")
+                    )
+                    if not cleaned_candidate:
+                        continue
+                    if await self._handle_special_candidate_url(
+                        client=client,
+                        session=session,
+                        candidate_url=cleaned_candidate,
+                        image_urls=image_urls,
+                        image_paths=image_paths,
+                        api_base=api_base,
+                        state=special_state,
                     ):
-                        image_urls.append(candidate_url)
+                        continue
+                    if cleaned_candidate.startswith(
+                        "http://"
+                    ) or cleaned_candidate.startswith("https://"):
+                        image_urls.append(cleaned_candidate)
                         logger.debug(
-                            f"🖼️ OpenAI 返回可直接访问的图像链接: {candidate_url}"
+                            f"🖼️ OpenAI 返回可直接访问的图像链接: {cleaned_candidate}"
                         )
                         continue
                     image_url, image_path = await client._download_image(
-                        candidate_url, session, use_cache=False
+                        cleaned_candidate, session, use_cache=False
                     )
                 else:
                     logger.warning(f"跳过非字符串类型的图像URL: {type(candidate_url)}")
@@ -406,14 +450,57 @@ class OpenAICompatProvider:
                 )
 
             if extracted_urls2 or extracted_paths2:
-                image_urls.extend(extracted_urls2)
-                image_paths.extend(extracted_paths2)
+                for url in extracted_urls2:
+                    cleaned_url = (
+                        str(url)
+                        .strip()
+                        .replace("&amp;", "&")
+                        .rstrip(").,;")
+                        .strip("'\"")
+                    )
+                    if not cleaned_url:
+                        continue
+                    if await self._handle_special_candidate_url(
+                        client=client,
+                        session=session,
+                        candidate_url=cleaned_url,
+                        image_urls=image_urls,
+                        image_paths=image_paths,
+                        api_base=api_base,
+                        state=special_state,
+                    ):
+                        continue
+                    if cleaned_url not in image_urls:
+                        image_urls.append(cleaned_url)
+                for p in extracted_paths2:
+                    if p and p not in image_paths:
+                        image_paths.append(p)
 
             if text_content:
                 http_urls = client._find_image_urls_in_text(text_content)
-                for url in http_urls:
-                    if url not in image_urls:
-                        image_urls.append(url)
+                extra_urls = self._find_additional_image_urls_in_text(text_content)
+                for url in [*http_urls, *extra_urls]:
+                    cleaned_url = (
+                        str(url)
+                        .strip()
+                        .replace("&amp;", "&")
+                        .rstrip(").,;")
+                        .strip("'\"")
+                    )
+                    if not cleaned_url:
+                        continue
+                    if await self._handle_special_candidate_url(
+                        client=client,
+                        session=session,
+                        candidate_url=cleaned_url,
+                        image_urls=image_urls,
+                        image_paths=image_paths,
+                        api_base=api_base,
+                        state=special_state,
+                    ):
+                        continue
+                    if cleaned_url not in image_urls:
+                        image_urls.append(cleaned_url)
 
                 loose_matches = re.finditer(
                     r"data:image/([a-zA-Z0-9.+-]+);base64,([-A-Za-z0-9+/=_\\s]+)",

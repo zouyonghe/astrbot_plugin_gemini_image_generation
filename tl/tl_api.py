@@ -419,6 +419,7 @@ class GeminiAPIClient:
             model=config.model,
             max_retries=max_retries,
             total_timeout=total_timeout,
+            api_base=config.api_base,
         )
 
     async def _make_request(
@@ -430,6 +431,7 @@ class GeminiAPIClient:
         model: str,
         max_retries: int,
         total_timeout: int = 120,
+        api_base: str | None = None,
     ) -> tuple[list[str], list[str], str | None, str | None]:
         """执行 API 请求并处理响应，每个重试有独立的超时控制"""
 
@@ -452,6 +454,7 @@ class GeminiAPIClient:
                     api_type,
                     model,
                     timeout=timeout_cfg,
+                    api_base=api_base,
                 )
 
             except asyncio.CancelledError:
@@ -535,6 +538,7 @@ class GeminiAPIClient:
         model: str,
         *,
         timeout: aiohttp.ClientTimeout | None = None,
+        api_base: str | None = None,
     ) -> tuple[list[str], list[str], str | None, str | None]:
         """执行实际的HTTP请求"""
         logger.debug(
@@ -586,7 +590,10 @@ class GeminiAPIClient:
                 logger.debug("API 调用成功")
                 provider = get_api_provider(api_type)
                 return await provider.parse_response(
-                    client=self, response_data=response_data, session=session
+                    client=self,
+                    response_data=response_data,
+                    session=session,
+                    api_base=api_base,
                 )
             elif response.status in [429, 402, 403]:
                 error_msg = response_data.get("error", {}).get(

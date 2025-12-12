@@ -14,12 +14,13 @@
       "api_type": {
         "description": "API 类型（必选）",
         "type": "string",
-        "hint": "必须选择 API 类型（google/openai/zai）。选择 zai 时使用 Zai 兼容参数传递",
+        "hint": "必须选择 API 类型（google/openai/zai/grok2api）。选择 zai 时使用 Zai 兼容参数传递；选择 grok2api 时启用图片相对路径/临时缓存兼容",
         "default": "openai",
         "options": [
           "google",
           "openai",
-          "zai"
+          "zai",
+          "grok2api"
         ]
       },
       "model": {

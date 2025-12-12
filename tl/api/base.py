@@ -40,5 +40,6 @@ class ApiProvider(Protocol):
         client: Any,
         response_data: dict[str, Any],
         session: aiohttp.ClientSession,
+        api_base: str | None = None,
     ) -> tuple[list[str], list[str], str | None, str | None]:  # noqa: ANN401
         ...

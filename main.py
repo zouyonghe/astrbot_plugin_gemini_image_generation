@@ -896,7 +896,7 @@ class GeminiImageGenerationPlugin(Star):
         elif not self.api_type:
             if not quiet:
                 logger.error(
-                    "✗ 未配置 api_settings.api_type（google/openai/zai），无法初始化 API 客户端"
+                    "✗ 未配置 api_settings.api_type（google/openai/zai/grok2api），无法初始化 API 客户端"
                 )
             return
 
@@ -1603,7 +1603,9 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
 
         # 视觉识别前确保拿到可读取的本地文件路径（URL 需要先下载）
         local_path = image_path
-        if isinstance(image_path, str) and image_path.startswith(("http://", "https://")):
+        if isinstance(image_path, str) and image_path.startswith(
+            ("http://", "https://")
+        ):
             try:
                 if self.api_client and hasattr(self.api_client, "_get_session"):
                     session = await self.api_client._get_session()
