@@ -283,7 +283,7 @@ async def save_base64_image(base64_data: str, image_format: str = "png") -> str 
     Returns:
         保存的文件路径，失败返回None；若已保存过相同数据则返回现有路径
     """
-    import hashlib
+
 
     # 去掉空白后计算哈希，用于去重
     cleaned_data = "".join(base64_data.split())
