@@ -83,6 +83,17 @@ class GoogleProvider:
 
         added_refs = 0
         fail_reasons: list[str] = []
+        total_ref_count = len(config.reference_images or [])
+        # 实际处理的参考图数量受 [:14] 限制
+        processed_ref_count = min(total_ref_count, 14)
+        if total_ref_count > 0:
+            if total_ref_count > processed_ref_count:
+                logger.info(
+                    f"📎 开始处理 {processed_ref_count} 张参考图片 (共配置 {total_ref_count} 张，最多处理 14 张)..."
+                )
+            else:
+                logger.info(f"📎 开始处理 {processed_ref_count} 张参考图片...")
+
         if config.reference_images:
             for idx, image_input in enumerate(config.reference_images[:14]):
                 image_str = str(image_input).strip()
@@ -139,6 +150,10 @@ class GoogleProvider:
                     continue
 
                 mime_type = client._ensure_mime_type(mime_type)
+                size_kb = len(validated_data) // 1024 if validated_data else 0
+                logger.info(
+                    f"📎 图片 {idx + 1}/{processed_ref_count} 已加入发送请求 ({mime_type}, {size_kb}KB)"
+                )
                 logger.debug(
                     "[google] 成功处理参考图 idx=%s mime=%s size=%s",
                     idx,
@@ -150,6 +165,17 @@ class GoogleProvider:
                     {"inlineData": {"mimeType": mime_type, "data": validated_data}}
                 )
                 added_refs += 1
+
+        # 输出最终统计
+        if processed_ref_count > 0:
+            if added_refs > 0:
+                logger.info(
+                    f"📎 参考图片处理完成：{added_refs}/{processed_ref_count} 张已成功加入发送请求"
+                )
+            else:
+                logger.info(
+                    f"📎 参考图片处理完成：0/{processed_ref_count} 张成功，全部未能加入发送请求"
+                )
 
         if config.reference_images and added_refs == 0:
             raise APIError(
