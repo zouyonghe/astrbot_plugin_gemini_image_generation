@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image as AstrImage
@@ -79,7 +78,7 @@ class GeminiImageGenerationPlugin(Star):
         self._cleanup_task: asyncio.Task | None = None
 
         # 加载配置
-        self.cfg = ConfigLoader.load(config)
+        self.cfg = ConfigLoader(config or {}).load()
 
         # 初始化各功能模块
         self._init_modules()
@@ -349,16 +348,21 @@ class GeminiImageGenerationPlugin(Star):
 
     # ===== 事件处理 =====
 
-    @filter.on_startup()
-    async def on_startup(self):
-        """插件启动初始化"""
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self):
+        """AstrBot 完成初始化后加载提供商"""
+        # 初始化时尝试加载
         self._load_provider_from_context(quiet=True)
         if self.cfg.help_render_mode == "local":
             asyncio.create_task(self._ensure_font_for_local_mode())
+
+        if not self.api_client:
+            self._load_provider_from_context()
+
         if self.api_client:
             logger.info("🎨 Gemini 图像生成插件已加载")
         else:
-            logger.debug("启动阶段未能初始化 API 客户端，待 on_astrbot_loaded 再补偿")
+            logger.error("✗ API 客户端未初始化，请检查提供商配置")
 
     async def _ensure_font_for_local_mode(self):
         """确保 local 渲染模式所需的字体已下载"""
@@ -366,19 +370,6 @@ class GeminiImageGenerationPlugin(Star):
             await ensure_font_downloaded()
         except Exception as e:
             logger.warning(f"字体下载任务异常: {e}")
-
-    @filter.on_astrbot_loaded()
-    async def on_astrbot_loaded(self):
-        """AstrBot 完成初始化后再次尝试加载提供商"""
-        logger.debug("on_astrbot_loaded 触发，尝试确保 api_client")
-        if not self.api_client:
-            self._load_provider_from_context()
-            if self.api_client:
-                logger.info("✓ AstrBot 加载完成后已成功初始化 API 客户端")
-            else:
-                logger.error(
-                    "✗ AstrBot 加载完成后仍未初始化 API 客户端，请检查提供商配置"
-                )
 
     # ===== 核心业务方法 =====
 
