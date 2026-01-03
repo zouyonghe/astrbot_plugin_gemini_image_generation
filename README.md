@@ -54,7 +54,7 @@
 ### 前置要求
 - AstrBot 4.5.0+
 - Python 3.10+
-- NapCat（推荐，用于头像获取等功能）
+- NapCat（必备目前仅做了napcat平台适配）
 
 ### 依赖库
 插件会自动安装以下依赖（见 [requirements.txt](requirements.txt)）：
