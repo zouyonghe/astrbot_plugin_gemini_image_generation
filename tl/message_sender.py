@@ -77,8 +77,9 @@ class MessageSender:
                 msg = f"⏱️ API响应 {api_duration:.1f}s"
             async for res in self.safe_send(event, event.plain_result(msg)):
                 yield res
-        except Exception:
-            pass
+        except Exception as e:
+            # 非关键统计信息发送失败时仅记录日志，避免影响主流程
+            logger.error(f"发送耗时统计消息失败: {e}")
 
     @staticmethod
     def clean_text_content(text: str) -> str:
