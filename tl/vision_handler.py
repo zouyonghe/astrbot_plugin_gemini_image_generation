@@ -116,8 +116,9 @@ class VisionHandler:
                 req.system_prompt += "\n" + extra
             else:
                 req.system_prompt = extra
-        except Exception:
-            pass
+        except Exception as e:
+            # 若修改 system_prompt 失败，则保留原有请求但记录日志以便排查
+            logger.warning(f"[LLM_CROP] 注入视觉裁剪 system_prompt 失败: {e}")
 
     async def llm_detect_and_split(self, image_path: str) -> list[str]:
         """使用视觉 LLM 识别裁剪框后切割，失败返回空列表"""
