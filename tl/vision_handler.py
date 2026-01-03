@@ -189,7 +189,7 @@ class VisionHandler:
             if not isinstance(bboxes, list):
                 return []
 
-            # 过滤有效框
+            # 过滤有效框并按缩放比例还原到原始尺寸
             clean_boxes = []
             for box in bboxes:
                 try:
@@ -200,10 +200,21 @@ class VisionHandler:
                 except Exception:
                     continue
                 if w > 0 and h > 0:
-                    clean_boxes.append({"x": x, "y": y, "width": w, "height": h})
+                    # 将坐标按比例还原到原始图片尺寸
+                    clean_boxes.append({
+                        "x": int(x * scale_ratio),
+                        "y": int(y * scale_ratio),
+                        "width": int(w * scale_ratio),
+                        "height": int(h * scale_ratio),
+                    })
 
             if not clean_boxes:
                 return []
+
+            if scale_ratio != 1.0:
+                logger.debug(
+                    f"[LLM_CROP] 已将 {len(clean_boxes)} 个边界框坐标还原到原始尺寸 (scale_ratio={scale_ratio:.2f})"
+                )
 
             # 调用裁剪工具
             return await asyncio.to_thread(
