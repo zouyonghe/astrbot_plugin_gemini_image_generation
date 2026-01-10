@@ -11,6 +11,7 @@ import io
 import os
 import re
 import struct
+import tempfile
 import time
 import urllib.parse
 from datetime import datetime, timedelta
@@ -132,20 +133,30 @@ def _decode_base64_to_temp_file(
     """
     将 base64 数据解码并保存到临时文件
 
+    注意：调用方负责清理返回的临时文件。建议在使用完毕后调用:
+        Path(result).unlink(missing_ok=True)
+    或使用 try...finally 块确保清理。
+
     Args:
         b64_data: base64 数据（可以是 data URI 或纯 base64）
         verify_image: 是否验证图片可读性
         logger_obj: 日志对象
 
     Returns:
-        临时文件路径，失败返回 None
+        临时文件路径，失败返回 None。调用方负责清理此文件。
     """
     try:
         data = b64_data
         if ";base64," in data:
             _, _, data = data.partition(";base64,")
         raw_bytes = base64.b64decode(data)
-        tmp_path = Path("/tmp") / f"cut_{int(time.time() * 1000)}.png"
+        tmp_file = tempfile.NamedTemporaryFile(
+            prefix=f"cut_{int(time.time() * 1000)}_",
+            suffix=".png",
+            delete=False,
+        )
+        tmp_path = Path(tmp_file.name)
+        tmp_file.close()
         tmp_path.write_bytes(raw_bytes)
 
         if verify_image and cv2.imread(str(tmp_path)) is None:
@@ -1051,6 +1062,17 @@ async def resolve_image_source_to_path(
     """
     将图片源转换为本地文件路径以便切割
 
+    注意：当返回的路径是临时文件（通过 base64/URL 转换生成）时，
+    调用方负责在使用完毕后清理该文件。建议使用 try...finally 块：
+
+        tmp_path = await resolve_image_source_to_path(source)
+        try:
+            # 使用 tmp_path
+            ...
+        finally:
+            if tmp_path and Path(tmp_path).exists():
+                Path(tmp_path).unlink(missing_ok=True)
+
     Args:
         source: 图片源（URL/文件/base64/data URL）
         image_input_mode: 参考图处理模式（统一 base64）
@@ -1058,6 +1080,9 @@ async def resolve_image_source_to_path(
         download_qq_image_fn: 处理 qpic 链接的下载函数（可选，需为 async）
         is_valid_checker: base64 校验函数
         logger_obj: 日志对象
+
+    Returns:
+        本地文件路径，失败返回 None。若为临时文件，调用方需负责清理。
     """
     if not source:
         return None
