@@ -55,7 +55,7 @@ from .tl.enhanced_prompts import (
 )
 from .tl.llm_tools import GeminiImageGenerationTool
 from .tl.tl_api import APIClient, ApiRequestConfig, get_api_client
-from .tl.tl_utils import AvatarManager, cleanup_old_images
+from .tl.tl_utils import AvatarManager, cleanup_old_images, format_error_message
 
 
 @register(
@@ -103,8 +103,12 @@ class GeminiImageGenerationPlugin(Star):
 
     def _init_modules(self):
         """初始化各功能处理模块"""
-        # 限流器
-        self.rate_limiter = RateLimiter(self.cfg)
+        # 限流器（使用 KV 存储持久化）
+        self.rate_limiter = RateLimiter(
+            self.cfg,
+            get_kv=self.get_kv_data,
+            put_kv=self.put_kv_data,
+        )
 
         # 头像处理器
         self.avatar_handler = AvatarHandler(
@@ -166,11 +170,17 @@ class GeminiImageGenerationPlugin(Star):
         self.avatar_manager = AvatarManager()
 
     def _update_modules_api_client(self):
-        """更新各模块的 API 客户端"""
+        """更新各模块的 API 客户端和相关配置"""
         if self.api_client:
             self.image_handler.update_config(api_client=self.api_client)
             self.vision_handler.update_config(api_client=self.api_client)
-            self.image_generator.update_config(api_client=self.api_client)
+            # 同步更新 ImageGenerator 的全部相关配置
+            self.image_generator.update_config(
+                api_client=self.api_client,
+                model=self.cfg.model,
+                api_type=self.cfg.api_type,
+                api_base=self.cfg.api_base,
+            )
 
     def _register_llm_tools(self):
         """注册 LLM 工具到 Context"""
@@ -309,6 +319,10 @@ class GeminiImageGenerationPlugin(Star):
 
                 prov_base = provider.provider_config.get("api_base")
                 if prov_base and not manual_api_base and not self.cfg.api_base:
+                    # 去掉末尾的 /v1，因为插件内部会自动根据 API 类型添加正确的版本前缀
+                    if prov_base.rstrip("/").endswith("/v1"):
+                        prov_base = prov_base.rstrip("/").removesuffix("/v1")
+                        logger.debug(f"已去除 api_base 末尾的 /v1: {prov_base}")
                     self.cfg.api_base = prov_base
 
                 logger.info(
@@ -488,11 +502,7 @@ class GeminiImageGenerationPlugin(Star):
 
         except Exception as e:
             logger.error(f"快捷生成失败: {e}", exc_info=True)
-            yield event.plain_result(
-                f"❌ 快速生成时出现异常：{str(e)}\n"
-                "🧐 可能原因：网络波动、配置缺失或依赖加载失败。\n"
-                "✅ 建议：稍后重试，并检查 API 配置与日志定位具体问题。"
-            )
+            yield event.plain_result(format_error_message(e))
         finally:
             try:
                 await self.avatar_manager.cleanup_used_avatars()

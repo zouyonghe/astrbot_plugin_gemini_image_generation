@@ -123,7 +123,7 @@
       "resolution_param_name": {
         "description": "分辨率参数名",
         "type": "string",
-        "hint": "API 请求中分辨率参数的字段名，不同 API 可能使用不同名称（如 image_size、size、resolution 等）。留空使用默认值 image_size",
+        "hint": "API 请求中分辨率参数的字段名，不同 API 可能使用不同名称（如 image_size、size、imageSize 等）。留空使用默认值 image_size",
         "default": "image_size"
       },
       "aspect_ratio_param_name": {

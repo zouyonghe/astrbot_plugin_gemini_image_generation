@@ -241,7 +241,8 @@ class GoogleProvider:
             logger.debug(f"设置长宽比: {ratio} (参数名: {aspect_ratio_key})")
 
         if image_config:
-            generation_config["image_config"] = image_config
+            # Gemini REST API 使用 camelCase，imageConfig 内的参数使用 snake_case
+            generation_config["imageConfig"] = image_config
 
         if config.temperature is not None:
             generation_config["temperature"] = config.temperature
@@ -262,9 +263,9 @@ class GoogleProvider:
         if tools:
             payload["tools"] = tools
 
-        if "image_config" in generation_config:
+        if "imageConfig" in generation_config:
             logger.debug(
-                f"实际发送的 image_config: {generation_config['image_config']}"
+                f"实际发送的 imageConfig: {generation_config['imageConfig']}"
             )
 
         return payload

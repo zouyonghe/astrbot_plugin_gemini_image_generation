@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from astrbot.api import logger
 
@@ -15,12 +16,51 @@ if TYPE_CHECKING:
 
 
 class RateLimiter:
-    """群限制和限流管理器"""
+    """群限制和限流管理器（支持 KV 持久化）"""
 
-    def __init__(self, config: PluginConfig):
+    KV_KEY = "rate_limit_buckets"
+
+    def __init__(
+        self,
+        config: PluginConfig,
+        *,
+        get_kv: Callable[[str, Any], Coroutine[Any, Any, Any]] | None = None,
+        put_kv: Callable[[str, Any], Coroutine[Any, Any, None]] | None = None,
+    ):
         self.config = config
         self._rate_limit_buckets: dict[str, list[float]] = {}
         self._rate_limit_lock = asyncio.Lock()
+        # KV 存储回调
+        self._get_kv = get_kv
+        self._put_kv = put_kv
+        self._loaded = False
+
+    async def _load_from_kv(self) -> None:
+        """从 KV 存储加载限流数据"""
+        if self._loaded or not self._get_kv:
+            return
+        try:
+            data = await self._get_kv(self.KV_KEY, None)
+            if data:
+                # 数据格式: {"group_id": [timestamp1, timestamp2, ...], ...}
+                if isinstance(data, str):
+                    data = json.loads(data)
+                if isinstance(data, dict):
+                    self._rate_limit_buckets = data
+                    logger.debug(f"从 KV 加载限流数据: {len(data)} 个群组")
+        except Exception as e:
+            logger.warning(f"加载限流数据失败: {e}")
+        finally:
+            self._loaded = True
+
+    async def _save_to_kv(self) -> None:
+        """保存限流数据到 KV 存储"""
+        if not self._put_kv:
+            return
+        try:
+            await self._put_kv(self.KV_KEY, self._rate_limit_buckets)
+        except Exception as e:
+            logger.debug(f"保存限流数据失败: {e}")
 
     def get_group_id_from_event(self, event: AstrMessageEvent) -> str | None:
         """从事件中解析群ID，仅在群聊场景下返回"""
@@ -70,7 +110,10 @@ class RateLimiter:
             logger.debug("未启用限流 group_id=%s", group_id)
             return True, None
 
-        now = time.monotonic()
+        # 首次使用时从 KV 加载
+        await self._load_from_kv()
+
+        now = time.time()  # 使用 time.time() 以便跨重启持久化
         window_start = now - self.config.rate_limit_period
 
         async with self._rate_limit_lock:
@@ -84,6 +127,7 @@ class RateLimiter:
                     retry_after = 0
 
                 self._rate_limit_buckets[group_id] = bucket
+                await self._save_to_kv()
                 logger.debug(
                     "触发限流 group_id=%s count=%s/%s retry_after=%s",
                     group_id,
@@ -100,6 +144,7 @@ class RateLimiter:
 
             bucket.append(now)
             self._rate_limit_buckets[group_id] = bucket
+            await self._save_to_kv()
 
         logger.debug(
             "限流检查通过 group_id=%s 当前计数=%s",
@@ -108,6 +153,7 @@ class RateLimiter:
         )
         return True, None
 
-    def reset(self):
+    async def reset(self) -> None:
         """重置限流状态"""
         self._rate_limit_buckets.clear()
+        await self._save_to_kv()

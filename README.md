@@ -1,8 +1,8 @@
-# AstrBot Gemini 图像生成插件 v1.8.3
+# AstrBot Gemini 图像生成插件 v1.8.4
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/Version-v1.8.3-blue)
+![Version](https://img.shields.io/badge/Version-v1.8.4-blue)
 ![License](https://img.shields.io/badge/License-MIT-orange)
 
 **🎨 强大的 Gemini 图像生成插件，支持智能头像参考和智能表情包切分**
@@ -27,6 +27,7 @@
 - **群内限流**: 单群在指定周期内的请求次数限制
 - **灵活配置**: 群限制和限流可同时启用，实现精细控制
 - **防滥用**: 有效防止API滥用和资源浪费
+- **持久化存储**: 限流数据使用 KV 存储，重启后不会丢失（需 AstrBot >= 4.9.2）
 
 ### 🧠 **智能特性**
 - **自然语言触发**: 支持"按照我"、"修改"、"@人"等自然语言触发
@@ -303,6 +304,12 @@
 2. **参考图模式**：当对话上下文包含图片或用户明确要求"修改这张图"时，LLM 会设置 `use_reference_images="true"`
 3. **头像参考模式**：当用户说"按照我"、"根据我"或@某人时，LLM 会设置 `include_user_avatar="true"` 以获取对应头像作为参考
 
+#### 触发器模式
+本插件采用触发器模式，避免图像生成耗时导致的超时问题：
+- AI 调用工具后会立即返回确认消息，告知用户图片正在后台生成
+- 图片生成完成后会自动发送给用户，无需重复请求
+- AI 会用自己的风格告知用户预计等待时间（通常 10-30 秒，高质量生成可能更长）
+
 此功能使 LLM 能够更智能地处理图像生成请求，无需用户记忆特定命令，通过自然语言即可实现图像生成和修改。
 
 ### 智能表情包切分
@@ -542,9 +549,10 @@ astrbot_plugin_gemini_image_generation/
   - [PR #2](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/2)：兼容 OpenAI/Gemini 混合 URL 响应格式
   - [PR #3](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/3)：兼容 OpenAI 传入参数
   - [PR #4](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/4)：手办化命令使用专用提示词
-- [@zouyonghe](https://github.com/zouyonghe)：新增代理支持、可选固定尺寸
+- [@zouyonghe](https://github.com/zouyonghe)：新增代理支持、可选固定尺寸、支持带空格参数（英文提示词）
   - [PR #5](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/5)：为 Gemini API 添加代理支持
   - [PR #6](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/6)：增加保留参考图尺寸开关
+  - [PR #50](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/50)：支持带空格参数（英文提示词）
 - [@vmoranv](https://github.com/vmoranv)：优化表情包提示词
   - [PR #11](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/11)：优化表情包提示词
 - [@itismygo](https://github.com/itismygo)：新增 grok2api 的 OpenAI 兼容适配
@@ -560,6 +568,7 @@ astrbot_plugin_gemini_image_generation/
 ## 🔗 相关链接
 
 - **项目地址**: [GitHub Repository](https://github.com/piexian/astrbot_plugin_gemini_image_generation)
+- **更新日志**: [CHANGELOG.md](./CHANGELOG.md)
 - **问题反馈**: [Issues](https://github.com/piexian/astrbot_plugin_gemini_image_generation/issues)
 - **AstrBot 文档**: [docs.astrbot.app](https://docs.astrbot.app)
 - [grok2api](https://github.com/chenyme/grok2api)
