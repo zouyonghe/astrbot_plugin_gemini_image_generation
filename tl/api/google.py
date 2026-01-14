@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+
 from astrbot.api import logger
 
 from ..api_types import APIError, ApiRequestConfig
@@ -264,9 +265,7 @@ class GoogleProvider:
             payload["tools"] = tools
 
         if "imageConfig" in generation_config:
-            logger.debug(
-                f"实际发送的 imageConfig: {generation_config['imageConfig']}"
-            )
+            logger.debug(f"实际发送的 imageConfig: {generation_config['imageConfig']}")
 
         return payload
 

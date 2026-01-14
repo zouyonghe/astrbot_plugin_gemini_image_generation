@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from pydantic import Field
+from pydantic.dataclasses import dataclass
+
 from astrbot.api import logger
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
-from pydantic import Field
-from pydantic.dataclasses import dataclass
 
 from .tl_utils import format_error_message
 
@@ -201,7 +202,9 @@ async def _background_generate_and_send(
                 except Exception as e:
                     logger.warning(f"[TOOL-BG] 发送结果失败: {e}")
 
-            logger.info(f"[TOOL-BG] 图像生成成功，已发送 {len(image_paths or [])} 张图片")
+            logger.info(
+                f"[TOOL-BG] 图像生成成功，已发送 {len(image_paths or [])} 张图片"
+            )
 
         else:
             # 生成失败，发送错误消息

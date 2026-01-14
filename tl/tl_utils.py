@@ -22,8 +22,9 @@ from uuid import uuid4
 
 import aiohttp
 import cv2
-from astrbot.api import logger
 from PIL import Image as PILImage
+
+from astrbot.api import logger
 
 SUPPORTED_IMAGE_MIME_TYPES = frozenset(
     {"image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"}
@@ -1381,4 +1382,3 @@ def format_error_message(error: Exception | str) -> str:
         "🧐 可能原因：网络波动、配置缺失或依赖加载失败。\n"
         "✅ 建议：请稍后重试，如持续出现请联系管理员查看日志。"
     )
-

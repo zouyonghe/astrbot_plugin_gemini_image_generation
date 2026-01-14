@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image as AstrImage
